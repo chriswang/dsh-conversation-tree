@@ -1,6 +1,6 @@
 {
   "name": "dsh-conversation-tree",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "对话树 / Conversation Tree：把对话按工作区与主题组织成一棵可折叠的树，并在会话列旁直接打开真实会话。",
   "license": "MIT",
   "repository": {

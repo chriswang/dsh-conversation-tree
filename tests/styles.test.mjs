@@ -685,3 +685,20 @@ test('search result rows reserve a second line and keep the cursor separate from
   assert.notEqual(mark, null, 'a matched run must be visible inside a snippet')
   assert.match(mark, /var\(--dsw-alias-brand-primary/, `the highlight asks the theme for its brand tint: ${mark}`)
 })
+
+/**
+ * A group row (「未分组」 without legacy topics) is a conversation list, not a
+ * node: it has no click action at all. It used to inherit the node row's pointer
+ * cursor and hover wash, so pressing it looked like a broken button. The sheet
+ * has to hand that affordance back only to rows that can actually be selected.
+ */
+test('a row that cannot be selected does not borrow the button affordance', () => {
+  const rule = declarations('.cm-node-row[data-selectable="false"]')
+  assert.notEqual(rule, null, 'the non-selectable row rule is missing from the shipped sheet')
+  assert.match(rule, /cursor:\s*default/, `it must not invite a click: ${rule}`)
+  assert.match(
+    bundle,
+    /\.cm-node-row:hover[^{]*:not\(\[data-selectable="false"\]\)[^{]*\{/,
+    'the hover wash must skip rows that have no action',
+  )
+})

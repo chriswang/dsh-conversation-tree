@@ -288,7 +288,8 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
    they work from a deep selection. Hover is the quietest of the three and never
    repaints a selected or path row. */
 .cm-node-row{display:flex;align-items:center;gap:6px;height:34px;box-sizing:border-box;padding:0 8px;border-radius:var(--dsw-radius-md,12px);cursor:pointer;user-select:none;font-size:14px;line-height:20px;color:var(--dsw-alias-label-primary,currentColor)}
-.cm-node-row:hover:not([data-selected="true"]):not([data-path-selected="true"]),.cm-node-row[data-menu="true"]:not([data-selected="true"]):not([data-path-selected="true"]){background:var(--dsw-alias-interactive-bg-hover,color-mix(in srgb,currentColor 7%,transparent))}
+.cm-node-row[data-selectable="false"]{cursor:default}
+.cm-node-row:hover:not([data-selected="true"]):not([data-path-selected="true"]):not([data-selectable="false"]),.cm-node-row[data-menu="true"]:not([data-selected="true"]):not([data-path-selected="true"]):not([data-selectable="false"]){background:var(--dsw-alias-interactive-bg-hover,color-mix(in srgb,currentColor 7%,transparent))}
 .cm-node-row[data-selected="true"],.cm-node-row[data-path-selected="true"]{background:color-mix(in srgb,var(--dsw-alias-brand-primary,currentColor) 7%,transparent);color:var(--dsw-alias-brand-primary,currentColor);font-weight:500}
 .cm-node-row[data-selected="true"] .cm-slot,.cm-node-row[data-path-selected="true"] .cm-slot{color:inherit}
 .cm-slot{flex:none;width:16px;height:20px;display:inline-flex;align-items:center;justify-content:center;color:var(--dsw-alias-label-tertiary,currentColor)}

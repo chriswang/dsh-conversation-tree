@@ -330,13 +330,13 @@ test('selecting a Workspace opens its topic column, labelled by level', () => {
   assert.deepEqual(titles, ['L1', 'L2'])
 })
 
-test('an empty Workspace still opens its topic column so its first topic can be created', () => {
+test('an empty Workspace opens no topic column', () => {
   const empty = { phase: 'ready', items: [{ workspaceId: 'w1', path: '/tmp/empty', title: '空的', sessionIds: [] }] }
   const markup = render(store(undefined, view({ selectedNodeId: '@ws:w1' })), {
     services: { sessions: { retain: id => ({ sessionId: id, release() {} }) }, workspaces: workspaces(empty) },
   })
-  assert.equal(columnCount(markup), 2)
-  assert.ok(markup.includes('aria-label="新增节点"'), 'the topic column offers adding a node')
+  assert.equal(columnCount(markup), 1, 'an empty column beside the tree is dead space, so it is not drawn')
+  assert.ok(!markup.includes('aria-label="新增节点"'), 'the first topic is created from the Workspace row menu instead')
 })
 
 test('selecting a node or a Workspace no longer renders the removed information bar', () => {
@@ -847,16 +847,24 @@ test('every space keeps an ungrouped row so a goal-less conversation can start a
   const markup = render(store(SPACES_MAP, view({ activeSpace: 'sp-empty' })))
   const row = rowMarkup(markup, 'ungrouped')
   assert.ok(row.includes('在未分组发起对话'), 'the empty space still offers the start action')
-  assert.ok(row.includes('data-selectable="false"'))
+  assert.ok(row.includes('data-selectable="true"'), 'it can be selected like any other row')
 })
 
 
-test('the ungrouped row is a conversation list: start action, no menu, not selectable', () => {
+test('the ungrouped row can be selected, but it is not a container', () => {
   const markup = render(store(SPACES_MAP, view({ activeSpace: 'sp-work' })))
   const row = rowMarkup(markup, 'ungrouped')
-  assert.ok(row.includes('data-selectable="false"'), 'it never opens a topic column')
+  assert.ok(row.includes('data-selectable="true"'), 'the reader can select the row')
   assert.ok(row.includes('在未分组发起对话'), 'it starts a conversation without a Workspace')
   assert.ok(!row.includes('aria-label="更多"'), 'it has nothing to rename or delete')
+  assert.ok(!row.includes('aria-label="新增节点"'), 'no child node can be created under it')
+})
+
+test('selecting the ungrouped row marks it without opening a column', () => {
+  const markup = render(store(MAP, view({ selectedNodeId: '@ungrouped' })))
+  const row = rowMarkup(markup, 'ungrouped')
+  assert.ok(row.includes('data-selected="true"'), 'the row carries the selected state')
+  assert.equal(columnCount(markup), 1, 'it opens no topic column of its own')
 })
 
 test('a legacy rootless topic still opens a read-only column in the default space', () => {
@@ -875,6 +883,18 @@ test('an empty space says how to fill it instead of rendering a blank column', (
   const markup = render(store(SPACES_MAP, view({ activeSpace: 'sp-empty' })))
   assert.ok(markup.includes('还没有工作区'), 'the empty state is explained')
   assert.ok(markup.includes('cm-hint-row'), 'the placeholder is a non-interactive hint row')
+})
+
+test('a selected Workspace without topics opens no topic column', () => {
+  const markup = render(store(SPACES_MAP, view({ activeSpace: 'sp-family', selectedNodeId: '@ws:w2' })))
+  assert.equal(columnCount(markup), 1, 'an empty column is dead space, so it is not drawn at all')
+  assert.ok(!markup.includes('还没有主题'), 'no placeholder stands in for the column either')
+})
+
+test('a Workspace with topics still opens its topic column', () => {
+  const markup = render(store(SPACES_MAP, view({ activeSpace: 'sp-work', selectedNodeId: '@ws:w1' })))
+  assert.equal(columnCount(markup), 2, 'a populated Workspace lists its topics')
+  assert.ok(markup.includes('外贸探索'))
 })
 
 test('a selected Workspace of another space opens nothing', () => {

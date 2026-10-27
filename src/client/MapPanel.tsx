@@ -2762,10 +2762,13 @@ export function MapPanel(props: MapPanelProps): ReactNode {
    *
    * Every space keeps this row so a conversation without a goal can be started
    * from anywhere, exactly as the design's "each space keeps its own ungrouped"
-   * rule requires. It is a conversation list, not a topic container: never
-   * selectable, no `⋯` menu, but it does offer starting a conversation. Only the
-   * default space can also show the legacy rootless topics older versions could
-   * create there (and only then does selecting it open a column).
+   * rule requires. It is a conversation list, not a topic container: selecting it
+   * marks the row (the reader gets the same selected state every row gives), but
+   * it opens no column and offers no `⋯` menu — there is nothing to rename or
+   * delete, and no child can be created under it. It does offer starting a
+   * conversation. Only the default space can also show the legacy rootless topics
+   * older versions could create there (and only then does selecting it open a
+   * read-only column).
    * @param spaceId - the space whose loose conversations it lists.
    * @returns the row.
    */
@@ -2783,7 +2786,8 @@ export function MapPanel(props: MapPanelProps): ReactNode {
       rollup: rollupForThreads(threads),
       tools: true,
       menu: false,
-      selectable: legacy.length > 0,
+      // Selectable for its own highlight only: no column, no menu, no children.
+      selectable: true,
       collapsed: view.collapsedIds.includes(key),
       threads: group.threads,
       threadFooter: group.footer,
@@ -2878,7 +2882,12 @@ export function MapPanel(props: MapPanelProps): ReactNode {
   // it opens their column (read-only: no `＋`, no new topics). Any other
   // ungrouped row is just a conversation list and opens nothing.
   const legacyColumnOpen = activeSpaceId === defaultSpaceId && activeWorkspaceId === null && legacyTopics.length > 0
-  const topicColumnOpen = legacyColumnOpen || activeWorkspace !== undefined
+  /** Top-level topics of the selected Workspace; empty when none is selected. */
+  const workspaceTopics = activeWorkspace === undefined ? [] : topNodesOf(state, activeWorkspace.workspaceId)
+  // A Workspace opens its topic column only when it has topics to list: an empty
+  // column is not a container, it is dead space beside the tree. The first topic
+  // stays one action away — the Workspace row's ⋯ menu offers 新建子节点.
+  const topicColumnOpen = legacyColumnOpen || workspaceTopics.length > 0
 
   /** One column per level the selection has opened. */
   const columns: NodeColumn[] = searching
@@ -2957,8 +2966,6 @@ export function MapPanel(props: MapPanelProps): ReactNode {
             threads: [],
           }],
       },
-      // Selecting a Workspace opens its topic column even while it is empty:
-      // that column is where its first topic is created.
       ...(workspaceReady && topicColumnOpen
         ? [legacyColumnOpen
           ? {
@@ -2970,7 +2977,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
             key: activeWorkspace?.workspaceId ?? 'workspace-topics',
             title: levelLabel(1),
             headerActions: addTopicButton(activeWorkspace?.workspaceId ?? null, null),
-            rows: topNodesOf(state, activeWorkspace?.workspaceId ?? null).map(node => nodeRow(node)),
+            rows: workspaceTopics.map(node => nodeRow(node)),
           }]
         : []),
       // Only a topic the selection actually passes through opens a column, and
