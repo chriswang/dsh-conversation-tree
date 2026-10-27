@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Conversation Tree">
+  <!-- The package mark is the sidebar glyph (src/client/Glyph.tsx) at 4×:
+       a root conversation above, a level bar, two branches below. 16 viewBox
+       geometry × 4, so the 1px icon stroke becomes 4px here and the two marks
+       cannot drift apart. -->
+  <g fill="none" stroke="#4D6BFE" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="32" cy="14.8" r="7" />
+    <path d="M32 21.8V32M15.6 42V32h32.8v10" />
+    <circle cx="15.6" cy="49" r="7" />
+    <circle cx="48.4" cy="49" r="7" />
+  </g>
+</svg>

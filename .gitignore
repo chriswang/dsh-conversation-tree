@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# dependencies
+node_modules/
+
+# build output (npm ships the prebuilt lib/)
+lib/
+
+# local runtime data
+.dsh-test/
+.uitest/
+.env
+.env.*
+*.log

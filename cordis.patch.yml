@@ -1,0 +1,5 @@
+# The conversation-tree bundle patch: one row whose Host half is inert and whose
+# client half is the browser roster entry the modules scan serves as a bundle.
+- insert:
+    - id: conversation-tree
+      name: 'dsh-conversation-tree'
