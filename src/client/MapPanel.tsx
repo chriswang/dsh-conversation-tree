@@ -29,11 +29,11 @@
  */
 import {
   Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
-  type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent, type ReactNode, type Ref,
+  type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, type ReactNode, type Ref,
 } from 'react'
 
 import {
-  MapError, MAX_DEPTH, UNGROUPED_ID, adoptThread, ancestorRowKeys, assignThreadIssue, assignThreads, breadcrumb,
+  MapError, MAX_DEPTH, DEFAULT_SPACE_TITLE, UNGROUPED_ID, adoptThread, ancestorRowKeys, assignThreadIssue, assignThreads, breadcrumb,
   childrenOf, createNode,
   createSpace, deleteNode, deleteSpace, directThreadsOf, homeOfSession, insertNodeBefore, isRecordedSubagent,
   looseRowKey, looseThreadsInSpace, moveNode, nodePath,
@@ -43,12 +43,13 @@ import {
   updateNode, visibleAncestorOf, workspaceDisplayTitle, workspaceKey, workspaceOfNode, workspaceSelection,
   workspacesInSpace, type MapNode, type MapState, type SpaceRef, type ThreadRef, type WorkspaceRef,
 } from '../shared/model.js'
+import type { Translate } from '../shared/copy.js'
 import type { KeyValueStore } from '../shared/persistence.js'
 import {
-  emptyStatusRollup, rollupStatuses, rollupStatusesBySpace,
+  emptyStatusRollup, mergeStatusRollups, rollupStatuses, rollupStatusesBySpace,
   type ObservedSessionStatus, type SpaceRollupThread, type StatusCategory, type StatusRollup,
 } from '../shared/status-rollup.js'
-import { relativeTime } from '../shared/time.js'
+import { relativeTimeLabel } from '../shared/time.js'
 import {
   buildSearchView, type ContentSearchHit, type SearchNodeItem, type SearchSnippet, type SearchThreadItem,
 } from '../shared/search.js'
@@ -61,7 +62,7 @@ import {
   type NodeColumn, type NodeRow, type ThreadRow, type ThreadStatus,
 } from './Columns.js'
 import {
-  DRAG_THRESHOLD_PX, decideDrop, exceedsDragThreshold,
+  DRAG_THRESHOLD_PX, decideDrop, exceedsDragThreshold, formatDragLabel,
   type DragPayload, type DropCandidate, type DropDecision, type DropKind,
 } from './row-drag.js'
 import {
@@ -69,6 +70,10 @@ import {
 } from './services.js'
 import { useBandFrame } from './split-frame.js'
 import { browserStorage } from './storage.js'
+import { describeError } from './error-text.js'
+import { displaySpaceTitle, workspaceTitleLabels } from './display.js'
+import { formatMapNotice } from './map-store.js'
+import { LocaleProvider, useLocaleT, useT } from './locale.js'
 import { NewChatGlyph, SearchGlyph } from './Glyph.js'
 import { StatusRollupBadge } from './StatusRollup.js'
 import { ViewToggle } from './ViewToggle.js'
@@ -83,8 +88,60 @@ import { ViewToggle } from './ViewToggle.js'
  */
 export { NodeColumnView, insertionLineStyle, showsStatusRollup } from './Columns.js'
 
+/**
+ * Re-exported for the render tests.
+ *
+ * The band's box is measured against the frame-wide overlay layer, not against
+ * whichever element happens to be its anchor; the pure offset rule is small but
+ * it is the difference between a band that sits on the Conversation column and
+ * one shifted by the Windows desktop caption row (see `split-frame.ts`).
+ */
+export { overlayOffset } from './split-frame.js'
+
 /** Fallback width of one cascading node column. */
 const NODE_COLUMN_WIDTH = 220
+
+/** Band width from which the space breadcrumb keeps both status clusters in numbers. */
+const BREADCRUMB_FULL_WIDTH = 480
+
+/** Narrowest band that still fits the current space's cluster as dots. */
+const BREADCRUMB_DOTS_WIDTH = 420
+
+/** How much of the space breadcrumb's status clusters one band width can draw. */
+export interface SpaceBreadcrumbDensities {
+  /** The root segment's density: the whole map's total always keeps its numbers. */
+  readonly root: 'cluster' | 'none'
+  /** The current space's density; narrower bands drop it before squeezing the name. */
+  readonly current: 'cluster' | 'dots' | 'none'
+}
+
+/**
+ * Choose the space breadcrumb's cluster densities for one band width.
+ *
+ * The root segment never degrades to dots: in map mode the product's left column
+ * is collapsed, so the band's root is the only always-on whole-map readout. The
+ * current segment's cluster is redundant with the tree's node rows, so it gives
+ * way first — first to dots, then entirely — while its name keeps ellipsizing.
+ * Search occupies the same row and takes its clusters out altogether. A single
+ * space repeats the root's numbers exactly, so the current segment keeps only its
+ * name (the reader confirmed this is the quieter first-run state).
+ * @param bandWidth - the band's width in CSS pixels.
+ * @param options - whether search is open and whether only one space exists.
+ * @returns the densities for the root and current segments.
+ */
+export function spaceBreadcrumbDensities(
+  bandWidth: number,
+  options: { search: boolean; singleSpace: boolean },
+): SpaceBreadcrumbDensities {
+  if (options.search) return { root: 'none', current: 'none' }
+  if (bandWidth >= BREADCRUMB_FULL_WIDTH) {
+    return { root: 'cluster', current: options.singleSpace ? 'none' : 'cluster' }
+  }
+  if (bandWidth >= BREADCRUMB_DOTS_WIDTH) {
+    return { root: 'cluster', current: options.singleSpace ? 'none' : 'dots' }
+  }
+  return { root: 'cluster', current: 'none' }
+}
 
 /** How many of a node's conversations are shown before a "show more" row. */
 const PREVIEW_THREADS = 5
@@ -187,12 +244,6 @@ export interface MapPanelProps extends RootPanelProps {
   storage?: KeyValueStore
 }
 
-/** Plain thrown-failure description for display in dialogs. */
-function describe(error: unknown): string {
-  if (error instanceof MapError) return error.message
-  return error instanceof Error ? error.message : String(error)
-}
-
 /** One destination offered by the 「移动到…」 picker. */
 export interface ThreadMoveOption {
   /** The select's value; `''` names the Workspace row itself (`nodeId === null`). */
@@ -215,14 +266,16 @@ export interface ThreadMoveOption {
  * @param state - the map.
  * @param sessionId - the conversation being moved.
  * @param workspaceId - its Workspace; `null` = the ungrouped bucket.
+ * @param t - the active translator (its dictionary names the Workspace row).
  * @returns the select's options, in display order.
  */
 export function threadMoveOptions(
   state: MapState,
   sessionId: string,
   workspaceId: string | null,
+  t: Translate,
 ): ThreadMoveOption[] {
-  return threadMoveTargets(state, workspaceId).map(target => ({
+  return threadMoveTargets(state, workspaceId, t('common.workspaceTopLevel')).map(target => ({
     value: target.nodeId ?? '',
     label: target.label,
     disabled: assignThreadIssue(state, sessionId, target.nodeId) !== null,
@@ -283,7 +336,8 @@ export interface MoveThreadFieldProps {
  * @returns the field.
  */
 export function MoveThreadField(props: MoveThreadFieldProps): ReactNode {
-  const rows = moveTreeRows(props.state, props.sessionId, props.workspaceId)
+  const t = useT()
+  const rows = moveTreeRows(props.state, props.sessionId, props.workspaceId, t)
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set<string>())
   const [activeKey, setActiveKey] = useState<string>(() => props.value)
   const visible = visibleTreeRows(rows, collapsed)
@@ -325,7 +379,7 @@ export function MoveThreadField(props: MoveThreadFieldProps): ReactNode {
   }
   return (
     <div className="cm-field">
-      <span className="cm-move-tree-label" id="cm-move-thread-label">移动到</span>
+      <span className="cm-move-tree-label" id="cm-move-thread-label">{t('panel.moveTo')}</span>
       <div
         className="cm-move-tree"
         id="cm-move-thread-target"
@@ -358,7 +412,7 @@ export function MoveThreadField(props: MoveThreadFieldProps): ReactNode {
                   className="cm-move-tree-toggle"
                   data-expanded={collapsed.has(row.key) ? 'false' : 'true'}
                   aria-expanded={!collapsed.has(row.key)}
-                  aria-label={collapsed.has(row.key) ? '展开下级节点' : '收起下级节点'}
+                  aria-label={collapsed.has(row.key) ? t('panel.expandChildren') : t('panel.collapseChildren')}
                   onClick={(event) => { event.stopPropagation(); toggle(row.key) }}
                 >
                   <ChevronGlyph />
@@ -374,7 +428,7 @@ export function MoveThreadField(props: MoveThreadFieldProps): ReactNode {
 }
 
 /** Why a subagent child has no move of its own. */
-const MOVE_SUBAGENT_NOTICE = '子智能体会话由它的父对话带出来，不能单独移动。'
+const MOVE_SUBAGENT_NOTICE_KEY = 'panel.subagentMoveNotice'
 
 /** What one conversation row's `⋯` menu offers. */
 export interface ThreadMenuModel {
@@ -395,13 +449,14 @@ export interface ThreadMenuModel {
  * row only says where such a conversation is managed.
  * @param state - the map.
  * @param thread - the conversation the menu belongs to.
+ * @param t - the active translator.
  * @returns the entries to render.
  */
-export function threadMenuModel(state: MapState, thread: ThreadRef): ThreadMenuModel {
+export function threadMenuModel(state: MapState, thread: ThreadRef, t: Translate): ThreadMenuModel {
   const move = !isRecordedSubagent(state, thread.sessionId) && thread.origin !== 'subagent'
   return {
     move,
-    notice: move ? null : MOVE_SUBAGENT_NOTICE,
+    notice: move ? null : t(MOVE_SUBAGENT_NOTICE_KEY),
   }
 }
 
@@ -741,12 +796,18 @@ export function followAfterMove(
 
 /* ── U7: the wording a refused move wears ───────────────────────────────── */
 
-/** The pointer's short wording for each refusal the model can raise. */
+/**
+ * The dictionary key of one refusal's dialog-shaped wording.
+ *
+ * These are longer than the pointer's short labels on purpose: a failed commit
+ * has room to explain itself. The model's code is the identity the wording is
+ * chosen by; a code missing here falls through to {@link describeError}.
+ */
 export const MOVE_ISSUE_MESSAGES: Readonly<Record<string, string>> = {
-  NOT_FOUND: '目标节点已不存在，本次移动没有生效。',
-  DEPTH: `这次移动会让层级超过 ${String(MAX_DEPTH)} 层。`,
-  ANCHOR: '插入位置已失效，请重试。',
-  WORKSPACE: '不能移到别的工作区。',
+  NOT_FOUND: 'panel.moveIssue.NOT_FOUND',
+  DEPTH: 'panel.moveIssue.DEPTH',
+  ANCHOR: 'panel.moveIssue.ANCHOR',
+  WORKSPACE: 'panel.moveIssue.WORKSPACE',
 }
 
 /**
@@ -756,10 +817,11 @@ export const MOVE_ISSUE_MESSAGES: Readonly<Record<string, string>> = {
  * ("移动" throughout, and no model jargon); anything else — a transport failure,
  * a store conflict — keeps its own wording rather than being flattened into a
  * generic one.
+ * @param t - the active translator.
  * @param error - whatever the store rejected with.
  * @returns the message for the band's error line.
  */
-export function moveFailureMessage(error: unknown): string {
+export function moveFailureMessage(t: Translate, error: unknown): string {
   // Duck-typed as well as `instanceof`: a refusal can cross a module boundary
   // (the Host half, a render test's own copy of the model), and the code is what
   // the reader's wording is chosen by either way.
@@ -768,8 +830,8 @@ export function moveFailureMessage(error: unknown): string {
     : typeof (error as { code?: unknown } | null)?.code === 'string'
       ? (error as { code: string }).code
       : null
-  if (code !== null) return MOVE_ISSUE_MESSAGES[code] ?? describe(error)
-  return describe(error)
+  const key = code === null ? undefined : MOVE_ISSUE_MESSAGES[code]
+  return key === undefined ? describeError(t, error) : t(key, { max: MAX_DEPTH })
 }
 
 /* ── D9: where a node lands among its new siblings ──────────────────────── */
@@ -818,18 +880,19 @@ export interface NodePositionFieldProps {
  * @returns the field.
  */
 export function NodePositionField(props: NodePositionFieldProps): ReactNode {
+  const t = useT()
   const anchors = siblingTargets(props.state, props.parentId, props.workspaceId, props.selfId)
   return (
     <div className="cm-field">
-      <label htmlFor="cm-node-position">位置</label>
+      <label htmlFor="cm-node-position">{t('panel.position')}</label>
       <select
         id="cm-node-position"
         className="cm-select"
         value={props.value}
         onChange={(event) => { props.onChange(event.target.value) }}
       >
-        <option value="">放到最后</option>
-        {anchors.map(node => <option key={node.id} value={node.id}>放到「{node.title}」之前</option>)}
+        <option value="">{t('panel.positionEnd')}</option>
+        {anchors.map(node => <option key={node.id} value={node.id}>{t('panel.positionBefore', { title: node.title })}</option>)}
       </select>
     </div>
   )
@@ -861,9 +924,15 @@ export interface MoveTreeRow {
  * @param state - the map.
  * @param sessionId - the conversation being moved.
  * @param workspaceId - its Workspace; `null` = the ungrouped bucket.
+ * @param t - the active translator (its dictionary names the Workspace row).
  * @returns every destination, in the order the tree shows them.
  */
-export function moveTreeRows(state: MapState, sessionId: string, workspaceId: string | null): MoveTreeRow[] {
+export function moveTreeRows(
+  state: MapState,
+  sessionId: string,
+  workspaceId: string | null,
+  t: Translate,
+): MoveTreeRow[] {
   const wanted = workspaceId ?? null
   const children = new Map<string, MapNode[]>()
   for (const node of state.nodes) {
@@ -876,7 +945,7 @@ export function moveTreeRows(state: MapState, sessionId: string, workspaceId: st
     [...nodes].sort((left, right) => left.position - right.position || left.title.localeCompare(right.title))
   const rows: MoveTreeRow[] = [{
     key: '',
-    label: threadMoveTargets(state, wanted)[0]?.label ?? '（工作区顶层）',
+    label: t('common.workspaceTopLevel'),
     depth: 0,
     nodeId: null,
     hasChildren: false,
@@ -989,6 +1058,15 @@ function LayersGlyph(): ReactNode {
   )
 }
 
+/** A house: the breadcrumb's root glyph ("全部空间"). 16-unit box, like LayersGlyph. */
+function HomeGlyph(): ReactNode {
+  return (
+    <svg className="cm-glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M2.8 7.2 8 2.9l5.2 4.3V13a.8.8 0 0 1-.8.8h-2.7V9.5H6.3v4.3H3.6a.8.8 0 0 1-.8-.8z" />
+    </svg>
+  )
+}
+
 /** Small chevron: the space switcher's trailing affordance. */
 function ChevronGlyph(): ReactNode {
   return (
@@ -1020,13 +1098,14 @@ const NO_PANEL_INFO: ObservableSnapshot<{ activePanelId: string | null }> = {
  * @returns the separator element.
  */
 function BandGutter(props: { width: number; max: number; onResize: (width: number) => void }): ReactNode {
+  const t = useT()
   const origin = useRef({ x: 0, width: props.width })
   return (
     <div
       className="cm-band-gutter"
       role="separator"
       aria-orientation="vertical"
-      aria-label="调整对话树栏宽度"
+      aria-label={t('panel.resizeBand')}
       aria-valuemin={MIN_MAP_WIDTH}
       aria-valuemax={Math.round(props.max)}
       aria-valuenow={Math.round(props.width)}
@@ -1155,11 +1234,12 @@ export interface SpaceMenuTrailingProps {
  * @returns the status badge, or the product's Workspace count.
  */
 export function SpaceMenuTrailing({ rollup, workspaceCount }: SpaceMenuTrailingProps): ReactNode {
+  const t = useT()
   if (rollup !== undefined && rollup.total > 0) {
-    return <StatusRollupBadge rollup={rollup} density="cluster" scope="该空间全部会话" />
+    return <StatusRollupBadge rollup={rollup} density="cluster" scope={t('panel.scope.spaceAll')} />
   }
   return (
-    <span className="cm-space-count" title={`${String(workspaceCount)} 个工作区`}>
+    <span className="cm-space-count" title={t('panel.workspaceCount', { n: workspaceCount })}>
       {workspaceCount}
     </span>
   )
@@ -1167,10 +1247,22 @@ export function SpaceMenuTrailing({ rollup, workspaceCount }: SpaceMenuTrailingP
 
 /**
  * Render the map band.
+ *
+ * The DSH locale service is read here and handed to the subtree through the
+ * locale context, so a language switch re-renders the band and every nested
+ * component (the columns, the dialogs, the pointer label) reads the new
+ * dictionary through {@link useT}.
  * @param props - framework render share plus the Sessions and Workspaces services.
  * @returns the positioned band, or nothing while it cannot be measured.
  */
 export function MapPanel(props: MapPanelProps): ReactNode {
+  const t = useLocaleT(props.services.locale)
+  return <LocaleProvider translator={t}><MapPanelView {...props} /></LocaleProvider>
+}
+
+/** The band body, rendered under the locale provider {@link MapPanel} mounts. */
+function MapPanelView(props: MapPanelProps): ReactNode {
+  const t = useT()
   const { services } = props
   const ids = (props.useSessions?.((state) => state.ids) ?? []) as string[]
   const byId = (props.useSessions?.((state) => state.byId) ?? {}) as Record<string, CatalogByIdRow>
@@ -1231,6 +1323,8 @@ export function MapPanel(props: MapPanelProps): ReactNode {
   const composingRef = useRef(false)
   const [menu, setMenu] = useState<MenuRequest | null>(null)
   const [spaceMenu, setSpaceMenu] = useState<{ x: number; y: number } | null>(null)
+  /** The space trigger that opened the menu: focus returns here when it is dismissed by keyboard. */
+  const spaceTriggerRef = useRef<HTMLButtonElement | null>(null)
   // The top bar's overflow. Maintenance actions (a manual catalog pull) are not
   // a first-level control: they live in a menu the reader opens on purpose.
   // Anchored by its right edge because the trigger sits at the window's right.
@@ -1456,6 +1550,14 @@ export function MapPanel(props: MapPanelProps): ReactNode {
     // `state.threads` changes with every index snapshot, so the memo only misses
     // when a status, a space, or the index actually changed.
   }, [spaceSignature, state.threads, categories, view.openSessionId, now])
+  /**
+   * The whole map's status, for the breadcrumb's root segment.
+   *
+   * It is the sum of the per-space rollups, not a second pass over the threads:
+   * "合计 = Σ 各空间" is then true by construction, and the root can never
+   * disagree with the space menu or the sidebar row about a conversation.
+   */
+  const allSpaceRollup = useMemo(() => mergeStatusRollups(spaceRollups.values()), [spaceRollups])
 
   useEffect(() => {
     const timer = setInterval(() => { setNow(Date.now()) }, 60000)
@@ -1485,6 +1587,13 @@ export function MapPanel(props: MapPanelProps): ReactNode {
         setError('')
         return
       }
+      // The space menu is the breadcrumb's own popup; Escape closes it and puts
+      // focus back on the root trigger, so a keyboard reader can reopen or move on.
+      if (spaceMenu !== null) {
+        spaceTriggerRef.current?.focus()
+        setSpaceMenu(null)
+        return
+      }
       if (searchOpen) {
         setSearchOpen(false)
         setQuery('')
@@ -1492,7 +1601,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
     }
     document.addEventListener('keydown', onKeyDown)
     return () => { document.removeEventListener('keydown', onKeyDown) }
-  }, [searchOpen, draft])
+  }, [searchOpen, draft, spaceMenu])
 
   useEffect(() => { saveView(store, view) }, [store, view])
 
@@ -1615,15 +1724,25 @@ export function MapPanel(props: MapPanelProps): ReactNode {
     () => state.threads.filter(thread => spaceOfThread(state, thread) === activeSpaceId),
     [state, activeSpaceId],
   )
+  const workspaceLabels = workspaceTitleLabels(t)
   const workspaceTitles = useMemo(() => {
     const titles: Record<string, string> = {}
-    for (const workspace of workspaces) titles[workspace.workspaceId] = workspaceDisplayTitle(workspace)
+    for (const workspace of workspaces) titles[workspace.workspaceId] = workspaceDisplayTitle(workspace, workspaceLabels)
     return titles
-    // `workspaceSignature` is the value identity of the Workspace list.
-  }, [workspaceSignature])
+    // `workspaceSignature` is the value identity of the Workspace list; the two
+    // label strings are what a row shows, so a language switch rebuilds the map.
+  }, [workspaceSignature, workspaceLabels.defaultWorkspace, workspaceLabels.workspaceFallback])
+  const searchLabels = {
+    ungrouped: t('common.ungrouped'),
+    untitled: t('common.untitledConversation'),
+    workspaceFallback: t('common.workspace'),
+  }
   const searchView = useMemo(
-    () => buildSearchView({ state, results, candidateThreads, workspaceTitles, contentHits }),
-    [state, results, candidateThreads, workspaceTitles, contentHits],
+    () => buildSearchView({ state, results, candidateThreads, workspaceTitles, contentHits, labels: searchLabels }),
+    [
+      state, results, candidateThreads, workspaceTitles, contentHits,
+      searchLabels.ungrouped, searchLabels.untitled, searchLabels.workspaceFallback,
+    ],
   )
 
   const bodySearchAvailable = typeof services.store.searchContent === 'function'
@@ -1810,7 +1929,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
       // A profile without the navigation service still gets the embedded pane;
       // only the right column would then be out of step.
       console.warn('conversation-map: native navigation unavailable', thrown)
-      setError(describe(thrown))
+      setError(describeError(t, thrown))
     }
   }
 
@@ -1842,7 +1961,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
   const apply = (change: (current: MapState) => MapState): void => {
     setError('')
     const outcome = services.store.update(change)
-    if (!outcome.ok) setError(describe(outcome.error))
+    if (!outcome.ok) setError(describeError(t, outcome.error))
   }
 
   // ── pointer drag ─────────────────────────────────────────────────────────
@@ -1959,7 +2078,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
       return
     }
     const next: DragOverlayState = {
-      label: hit.decision.label,
+      label: formatDragLabel(t, hit.decision.label),
       tone: dragLabelTone(hit.decision),
       dropKey: hit.key,
       insertEdge: hit.insertEdge,
@@ -2152,7 +2271,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
     const outcome = services.store.update(current => applyDragPlan(current, plan))
     if (!outcome.ok) {
       // U7: the refusal is restated in the reader's own vocabulary.
-      setError(moveFailureMessage(outcome.error))
+      setError(moveFailureMessage(t, outcome.error))
       return
     }
     // U6: show where it went.
@@ -2235,7 +2354,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
             description: draft.description,
             id,
           }).state)
-          if (!outcome.ok) { setDialogError(describe(outcome.error)); return }
+          if (!outcome.ok) { setDialogError(describeError(t, outcome.error)); return }
           select(id)
           closeDraft()
           return
@@ -2252,10 +2371,10 @@ export function MapPanel(props: MapPanelProps): ReactNode {
           if (anchor !== null) return insertNodeBefore(next, id, draft.parentId, anchor)
           return parentChanged ? moveNode(next, id, draft.parentId) : next
         })
-        if (!outcome.ok) { setDialogError(describe(outcome.error)); return }
+        if (!outcome.ok) { setDialogError(describeError(t, outcome.error)); return }
         closeDraft()
       } catch (thrown) {
-        setDialogError(describe(thrown))
+        setDialogError(describeError(t, thrown))
       }
       return
     }
@@ -2266,14 +2385,14 @@ export function MapPanel(props: MapPanelProps): ReactNode {
     if (draft.kind === 'workspace-rename') {
       const workspaceId = draft.workspaceId
       const title = draft.title.trim()
-      if (title === '') { setDialogError('工作区名称不能为空。'); return }
+      if (title === '') { setDialogError(t('panel.error.workspaceTitleEmpty')); return }
       setBusy(true)
       void (async () => {
         try {
           await services.workspaces.rename(workspaceId, title)
           closeDraft()
         } catch (thrown) {
-          setDialogError(describe(thrown))
+          setDialogError(describeError(t, thrown))
         } finally {
           setBusy(false)
         }
@@ -2285,52 +2404,66 @@ export function MapPanel(props: MapPanelProps): ReactNode {
         // Mint the id up front for replayability, then select it in the view.
         const id = crypto.randomUUID()
         const outcome = services.store.update(current => createSpace(current, { title: draft.title, id }).state)
-        if (!outcome.ok) { setDialogError(describe(outcome.error)); return }
+        if (!outcome.ok) { setDialogError(describeError(t, outcome.error)); return }
         update({ activeSpace: id })
         closeDraft()
       } catch (thrown) {
-        setDialogError(describe(thrown))
+        setDialogError(describeError(t, thrown))
       }
       return
     }
     if (draft.kind === 'space-rename') {
       try {
-        const outcome = services.store.update(current => renameSpace(current, { id: draft.spaceId, title: draft.title }))
-        if (!outcome.ok) { setDialogError(describe(outcome.error)); return }
+        const outcome = services.store.update(current => {
+          // The default space's label is dictionary copy, not stored text. Its
+          // rename dialog opens with that localized name; submitting it
+          // unchanged keeps the language-neutral marker instead of writing the
+          // active language into user data.
+          const space = current.spaces.find(candidate => candidate.id === draft.spaceId)
+          const unchangedDefault = space !== undefined
+            && space.id === current.defaultSpaceId
+            && space.title === DEFAULT_SPACE_TITLE
+            && draft.title.trim() === t('common.defaultSpace')
+          return renameSpace(current, {
+            id: draft.spaceId,
+            title: unchangedDefault ? DEFAULT_SPACE_TITLE : draft.title,
+          })
+        })
+        if (!outcome.ok) { setDialogError(describeError(t, outcome.error)); return }
         closeDraft()
       } catch (thrown) {
-        setDialogError(describe(thrown))
+        setDialogError(describeError(t, thrown))
       }
       return
     }
     if (draft.kind === 'space-delete') {
       try {
         const outcome = services.store.update(current => deleteSpace(current, draft.spaceId))
-        if (!outcome.ok) { setDialogError(describe(outcome.error)); return }
+        if (!outcome.ok) { setDialogError(describeError(t, outcome.error)); return }
         if (activeSpaceId === draft.spaceId) update({ activeSpace: services.store.getSnapshot().doc.defaultSpaceId })
         closeDraft()
       } catch (thrown) {
-        setDialogError(describe(thrown))
+        setDialogError(describeError(t, thrown))
       }
       return
     }
     if (draft.kind === 'workspace-space') {
       try {
         const outcome = services.store.update(current => setWorkspaceSpace(current, draft.workspaceId, draft.spaceId))
-        if (!outcome.ok) { setDialogError(describe(outcome.error)); return }
+        if (!outcome.ok) { setDialogError(describeError(t, outcome.error)); return }
         closeDraft()
       } catch (thrown) {
-        setDialogError(describe(thrown))
+        setDialogError(describeError(t, thrown))
       }
       return
     }
     if (draft.kind === 'thread-space') {
       try {
         const outcome = services.store.update(current => setThreadSpace(current, draft.sessionId, draft.spaceId))
-        if (!outcome.ok) { setDialogError(describe(outcome.error)); return }
+        if (!outcome.ok) { setDialogError(describeError(t, outcome.error)); return }
         closeDraft()
       } catch (thrown) {
-        setDialogError(describe(thrown))
+        setDialogError(describeError(t, thrown))
       }
       return
     }
@@ -2342,7 +2475,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
       if (threadMoveIsNoop(state, draft.sessionId, value)) { closeDraft(); return }
       try {
         const outcome = services.store.update(threadMoveChange(draft.sessionId, value))
-        if (!outcome.ok) { setDialogError(moveFailureMessage(outcome.error)); return }
+        if (!outcome.ok) { setDialogError(moveFailureMessage(t, outcome.error)); return }
         applyFollow(followAfterMove(
           state,
           { kind: 'thread', sessionId: draft.sessionId, nodeId: draft.nodeId },
@@ -2350,12 +2483,12 @@ export function MapPanel(props: MapPanelProps): ReactNode {
         ))
         closeDraft()
       } catch (thrown) {
-        setDialogError(moveFailureMessage(thrown))
+        setDialogError(moveFailureMessage(t, thrown))
       }
       return
     }
     const path = draft.path.trim()
-    if (path === '') { setDialogError('请输入要作为工作区的目录。'); return }
+    if (path === '') { setDialogError(t('panel.error.workspacePathEmpty')); return }
     setBusy(true)
     void (async () => {
       try {
@@ -2374,7 +2507,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
           closeDraft()
           switchSpace(existingSpace)
           select(workspaceKey(created.workspaceId))
-          setError(`该目录已是「${owner?.title ?? '其他空间'}」空间的工作区，已切换过去；如需移动，请在该空间里改它的所属空间。`)
+          setError(t('panel.error.workspaceInOtherSpace', { space: owner?.title ?? t('panel.otherSpace') }))
           return
         }
         if (activeSpaceId !== defaultSpaceId) {
@@ -2383,7 +2516,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
         select(workspaceKey(created.workspaceId))
         closeDraft()
       } catch (thrown) {
-        setDialogError(describe(thrown))
+        setDialogError(describeError(t, thrown))
       } finally {
         setBusy(false)
       }
@@ -2448,7 +2581,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
     void (async () => {
       try {
         const created = await services.sessions.create?.(workspaceId === null ? {} : { workspaceId })
-        if (created === undefined) throw new Error('当前客户端没有提供创建会话的能力。')
+        if (created === undefined) throw new Error(t('panel.error.noCreateSession'))
         services.store.update(current => adoptThread(current, { sessionId: created, title: '', nodeId, workspaceId, spaceId }))
         update(looseRow ? { openSessionId: created } : { openSessionId: created, selectedNodeId: nodeKey })
         mapNavigation.current = created
@@ -2457,11 +2590,11 @@ export function MapPanel(props: MapPanelProps): ReactNode {
         } catch (thrown) {
           mapNavigation.current = null
           console.warn('conversation-map: opening the new conversation failed', thrown)
-          setError(describe(thrown))
+          setError(describeError(t, thrown))
         }
       } catch (thrown) {
         console.warn('conversation-map: creating a conversation failed', thrown)
-        setError(describe(thrown))
+        setError(describeError(t, thrown))
       }
     })()
   }
@@ -2528,7 +2661,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
   /** Rename one Workspace through the Host. */
   const openWorkspaceRename = (workspace: WorkspaceRef): void => {
     setDialogError('')
-    setDraft({ kind: 'workspace-rename', workspaceId: workspace.workspaceId, title: workspaceDisplayTitle(workspace) })
+    setDraft({ kind: 'workspace-rename', workspaceId: workspace.workspaceId, title: workspaceDisplayTitle(workspace, workspaceLabels) })
   }
 
   /** Move one Workspace into another space (or back to the default one). */
@@ -2537,7 +2670,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
     setDraft({
       kind: 'workspace-space',
       workspaceId: workspace.workspaceId,
-      title: workspaceDisplayTitle(workspace),
+      title: workspaceDisplayTitle(workspace, workspaceLabels),
       spaceId: spaceOfWorkspace(state, workspace.workspaceId),
     })
   }
@@ -2583,19 +2716,19 @@ export function MapPanel(props: MapPanelProps): ReactNode {
   /** Open the rename dialog for one space. */
   const openSpaceRename = (space: SpaceRef): void => {
     setDialogError('')
-    setDraft({ kind: 'space-rename', spaceId: space.id, title: space.title })
+    setDraft({ kind: 'space-rename', spaceId: space.id, title: displaySpaceTitle(t, space, state) })
   }
 
   /** Ask before deleting one (non-default) space. */
   const openSpaceDelete = (space: SpaceRef): void => {
     setDialogError('')
-    setDraft({ kind: 'space-delete', spaceId: space.id, title: space.title })
+    setDraft({ kind: 'space-delete', spaceId: space.id, title: displaySpaceTitle(t, space, state) })
   }
 
   /** Ask before removing a Workspace registration; its Sessions and files stay. */
   const openWorkspaceDelete = (workspace: WorkspaceRef): void => {
     setDialogError('')
-    setDraft({ kind: 'workspace-delete', workspaceId: workspace.workspaceId, title: workspaceDisplayTitle(workspace) })
+    setDraft({ kind: 'workspace-delete', workspaceId: workspace.workspaceId, title: workspaceDisplayTitle(workspace, workspaceLabels) })
   }
 
   /** Remove one Workspace registration; its Sessions and files stay. */
@@ -2607,7 +2740,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
         await services.workspaces.delete(workspaceId)
         closeDraft()
       } catch (thrown) {
-        setDialogError(describe(thrown))
+        setDialogError(describeError(t, thrown))
       } finally {
         setBusy(false)
       }
@@ -2627,19 +2760,34 @@ export function MapPanel(props: MapPanelProps): ReactNode {
   const statusOf = (sessionId: string): ThreadStatus | undefined => {
     const status = statuses.get(sessionId)
     switch (status?.pendingInteraction?.kind) {
-      case 'approval': return { state: 'warning', label: '等待审批', compact: '待审批' }
-      case 'plan-review': return { state: 'warning', label: '计划待审', compact: '计划待审' }
-      case 'question': return { state: 'warning', label: '等待回答', compact: '待回答' }
+      case 'approval':
+        return {
+          state: 'warning',
+          label: t('panel.status.awaitApproval'),
+          compact: t('panel.status.awaitApprovalCompact'),
+        }
+      case 'plan-review':
+        return {
+          state: 'warning',
+          label: t('panel.status.planReview'),
+          compact: t('panel.status.planReview'),
+        }
+      case 'question':
+        return {
+          state: 'warning',
+          label: t('panel.status.awaitAnswer'),
+          compact: t('panel.status.awaitAnswerCompact'),
+        }
       default: break
     }
-    if (status?.running === true) return { state: 'ongoing', label: '进行中', compact: '' }
+    if (status?.running === true) return { state: 'ongoing', label: t('panel.status.running'), compact: '' }
     // A session whose own subagents are still working is live even when its own
     // turn has stopped, exactly as the shipped list reports it.
     const subagents = projections[sessionId]?.values?.subagentCatalog ?? []
     if (subagents.some(child => (statuses.get(child.id)?.running ?? byId[child.id]?.running) === true)) {
-      return { state: 'ongoing', label: '子智能体运行中', compact: '' }
+      return { state: 'ongoing', label: t('panel.status.subagentRunning'), compact: '' }
     }
-    if (status?.completionUnread === true) return { state: 'done', label: '已完成', compact: '' }
+    if (status?.completionUnread === true) return { state: 'done', label: t('panel.status.done'), compact: '' }
     return undefined
   }
 
@@ -2662,7 +2810,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
       // A provisional row says what it is instead of borrowing the Workspace or
       // session id as a title.
       title: summary?.blank === true ? 'New Session' : thread.title,
-      time: relativeTime(thread.updatedAt, now),
+      time: relativeTimeLabel(t, thread.updatedAt, now),
       status: statusOf(thread.sessionId),
       workspaceId: thread.workspaceId ?? null,
       ...note === undefined ? {} : { note },
@@ -2699,7 +2847,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
             }))
           }}
         >
-          {remaining > 0 ? `显示更多（还有 ${String(remaining)} 条）` : '收起'}
+          {remaining > 0 ? t('panel.showMoreRemaining', { n: remaining }) : t('common.collapse')}
         </button>
       ),
     }
@@ -2711,7 +2859,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
     const group = threadGroup(key, directThreadsOf(state, workspace.workspaceId))
     return {
       id: key,
-      title: workspaceDisplayTitle(workspace),
+      title: workspaceDisplayTitle(workspace, workspaceLabels),
       kind: 'workspace',
       workspaceId: workspace.workspaceId,
       childCount: topNodesOf(state, workspace.workspaceId).length,
@@ -2779,7 +2927,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
     const group = threadGroup(key, threads)
     return {
       id: key,
-      title: '未分组',
+      title: t('common.ungrouped'),
       kind: 'ungrouped',
       workspaceId: null,
       childCount: legacy.length,
@@ -2837,7 +2985,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
       } catch (thrown) {
         // Every failure here is recoverable by hand: the field beside the
         // button takes an absolute path, so the guidance rides the message.
-        setDialogError(`${describe(thrown)} 也可以直接在「目录」框输入绝对路径。`)
+        setDialogError(t('panel.error.pickerFallback', { message: describeError(t, thrown) }))
       } finally {
         setPicking(false)
       }
@@ -2849,8 +2997,8 @@ export function MapPanel(props: MapPanelProps): ReactNode {
     <button
       type="button"
       className="cm-icon-btn"
-      title={parentId === null ? '新增顶层节点' : '在这个节点下新增子节点'}
-      aria-label="新增节点"
+      title={parentId === null ? t('panel.addTopNode') : t('panel.addChildNode')}
+      aria-label={t('panel.addNode')}
       onClick={() => {
         setQuery('')
         setDialogError('')
@@ -2866,8 +3014,8 @@ export function MapPanel(props: MapPanelProps): ReactNode {
     <button
       type="button"
       className="cm-icon-btn"
-      title="新增工作区"
-      aria-label="新增工作区"
+      title={t('panel.addWorkspace')}
+      aria-label={t('panel.addWorkspace')}
       onClick={openWorkspaceCreate}
     >
       <PlusGlyph />
@@ -2896,7 +3044,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
       if (searchView.threads.length > 0) {
         rows.push({
           id: SEARCH_THREADS_ID,
-          title: '匹配的对话',
+          title: t('panel.search.matchedThreads'),
           kind: 'node' as const,
           childCount: 0,
           tools: false,
@@ -2919,20 +3067,25 @@ export function MapPanel(props: MapPanelProps): ReactNode {
       if (searchView.empty && !bodyPending) {
         rows.push(hintRow(
           SEARCH_EMPTY_ID,
-          `没有匹配「${bodyQuery}」的节点或对话。搜索范围：节点标题与说明、会话标题与正文。`,
+          t('panel.search.empty', { query: bodyQuery }),
         ))
       }
       if (searchView.empty && bodyPending) {
         rows.push(hintRow(
           SEARCH_PROGRESS_ID,
           contentProgress === null
-            ? '正在检索会话正文…'
-            : `正在检索会话正文…（已索引 ${String(contentProgress.scanned)}/${String(contentProgress.total)} 个会话）`,
+            ? t('panel.search.scanning')
+            : t('panel.search.scanningProgress', {
+              scanned: contentProgress.scanned,
+              total: contentProgress.total,
+            }),
         ))
       }
       return [{
         key: 'search',
-        title: searchView.items.length === 0 ? '搜索结果' : `搜索结果（${String(searchView.items.length)}）`,
+        title: searchView.items.length === 0
+          ? t('panel.search.title')
+          : t('panel.search.titleCount', { n: searchView.items.length }),
         rows,
       }]
     })()
@@ -2947,7 +3100,11 @@ export function MapPanel(props: MapPanelProps): ReactNode {
             if (scopedWorkspaces.length === 0) {
               rows.push(hintRow(
                 '@hint-empty-space',
-                `「${activeSpace?.title ?? '这个空间'}」还没有工作区 —— 点 ＋ 新建，或切到默认空间把已有工作区移进来。`,
+                t('panel.emptySpace', {
+                  space: activeSpace === undefined
+                    ? t('panel.thisSpace')
+                    : displaySpaceTitle(t, activeSpace, state),
+                }),
               ))
             }
             for (const workspace of scopedWorkspaces) rows.push(workspaceRow(workspace))
@@ -2958,7 +3115,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
           })()
           : [{
             id: PENDING_ROW_ID,
-            title: '正在同步工作区…',
+            title: t('panel.syncingWorkspaces'),
             kind: 'node' as const,
             childCount: 0,
             tools: false,
@@ -3008,9 +3165,9 @@ export function MapPanel(props: MapPanelProps): ReactNode {
       if (space === undefined) return null
       return (
         <>
-          <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { openSpaceRename(space) }) }}>重命名空间</button>
+          <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { openSpaceRename(space) }) }}>{t('panel.menu.renameSpace')}</button>
           {space.id !== defaultSpaceId && (
-            <button type="button" className="cm-menu-item" data-danger="true" onClick={() => { menuAction(() => { openSpaceDelete(space) }) }}>删除空间</button>
+            <button type="button" className="cm-menu-item" data-danger="true" onClick={() => { menuAction(() => { openSpaceDelete(space) }) }}>{t('panel.menu.deleteSpace')}</button>
           )}
         </>
       )
@@ -3022,17 +3179,17 @@ export function MapPanel(props: MapPanelProps): ReactNode {
       if (workspace === undefined) return null
       return (
         <>
-          <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { openWorkspaceRename(workspace) }) }}>重命名工作区</button>
-          <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { openWorkspaceSpace(workspace) }) }}>所属空间…</button>
+          <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { openWorkspaceRename(workspace) }) }}>{t('panel.menu.renameWorkspace')}</button>
+          <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { openWorkspaceSpace(workspace) }) }}>{t('panel.menu.workspaceSpace')}</button>
           <button type="button" className="cm-menu-item" onClick={() => {
             menuAction(() => {
               select(workspaceKey(workspace.workspaceId))
               setDialogError('')
               setDraft({ kind: 'node', workspaceId: workspace.workspaceId, parentId: null, title: '', description: '' })
             })
-          }}>新建子节点</button>
-          <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { newThread(workspaceKey(workspace.workspaceId)) }) }}>在此发起对话</button>
-          <button type="button" className="cm-menu-item" data-danger="true" onClick={() => { menuAction(() => { openWorkspaceDelete(workspace) }) }}>删除工作区</button>
+          }}>{t('panel.menu.newChild')}</button>
+          <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { newThread(workspaceKey(workspace.workspaceId)) }) }}>{t('panel.menu.startHere')}</button>
+          <button type="button" className="cm-menu-item" data-danger="true" onClick={() => { menuAction(() => { openWorkspaceDelete(workspace) }) }}>{t('panel.menu.deleteWorkspace')}</button>
         </>
       )
     }
@@ -3041,20 +3198,20 @@ export function MapPanel(props: MapPanelProps): ReactNode {
       if (node === undefined) return null
       return (
         <>
-          <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { setDialogError(''); setDraft({ kind: 'node', id: node.id, workspaceId: workspaceOfNode(node), parentId: node.parentId, originalParentId: node.parentId, title: node.title, description: node.description }) }) }}>编辑节点</button>
-          <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { select(node.id); setDialogError(''); setDraft({ kind: 'node', workspaceId: workspaceOfNode(node), parentId: node.id, title: '', description: '' }) }) }}>新建子节点</button>
-          <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { newThread(node.id) }) }}>在此发起对话</button>
-          <button type="button" className="cm-menu-item" data-danger="true" onClick={() => { menuAction(() => { removeNode(node.id) }) }}>删除节点</button>
+          <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { setDialogError(''); setDraft({ kind: 'node', id: node.id, workspaceId: workspaceOfNode(node), parentId: node.parentId, originalParentId: node.parentId, title: node.title, description: node.description }) }) }}>{t('panel.menu.editNode')}</button>
+          <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { select(node.id); setDialogError(''); setDraft({ kind: 'node', workspaceId: workspaceOfNode(node), parentId: node.id, title: '', description: '' }) }) }}>{t('panel.menu.newChild')}</button>
+          <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { newThread(node.id) }) }}>{t('panel.menu.startHere')}</button>
+          <button type="button" className="cm-menu-item" data-danger="true" onClick={() => { menuAction(() => { removeNode(node.id) }) }}>{t('panel.menu.deleteNode')}</button>
         </>
       )
     }
     const thread = state.threads.find(candidate => candidate.sessionId === menu.id)
     if (thread === undefined) return null
     const loose = (thread.workspaceId ?? null) === null
-    const entries = threadMenuModel(state, thread)
+    const entries = threadMenuModel(state, thread, t)
     const spaceItem = loose
       ? (
-        <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { openThreadSpace(thread) }) }}>归入空间…</button>
+        <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { openThreadSpace(thread) }) }}>{t('panel.menu.assignSpace')}</button>
       )
       : null
     // The picker is the whole offer: every destination, including the Workspace
@@ -3062,7 +3219,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
     // under conditions the reader cannot see (BL-1).
     const moveItem = entries.move
       ? (
-        <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { openThreadMove(thread) }) }}>移动到…</button>
+        <button type="button" className="cm-menu-item" onClick={() => { menuAction(() => { openThreadMove(thread) }) }}>{t('panel.menu.moveTo')}</button>
       )
       : null
     // A subagent row has no move of its own, so it says where it is managed
@@ -3091,18 +3248,24 @@ export function MapPanel(props: MapPanelProps): ReactNode {
   const dialogWorkspaceLabel = draft !== null && draft.kind === 'node'
     ? (() => {
       const workspace = workspaces.find(candidate => candidate.workspaceId === draft.workspaceId)
-      return workspace === undefined ? '未分组' : workspaceDisplayTitle(workspace)
+      return workspace === undefined ? t('common.ungrouped') : workspaceDisplayTitle(workspace, workspaceLabels)
     })()
     : ''
 
   /** Surface a store-level sync/conflict message next to local errors. */
-  const displayError = error !== '' ? error : snapshot.error ?? ''
+  const displayError = error !== ''
+    ? error
+    : snapshot.error === undefined ? '' : formatMapNotice(t, snapshot.error)
 
-  // Geometry handed to CSS: the band's left/width, the shipped header's
-  // leading-row offset/height (so the switch lines up with the product's own
-  // header), and the window-chrome inset the first control must clear.
+  // Geometry handed to CSS: the band's box over the Conversation column
+  // (left/top/width in the overlay layer's coordinates — the Windows desktop
+  // caption row lives in the frame's padding, so the band's top is not 0 there),
+  // the shipped header's leading-row offset/height (so the switch lines up with
+  // the product's own header), and the window-chrome inset the first control
+  // must clear.
   const bandStyle = {
     left: frame.left,
+    top: frame.top,
     width: bandWidth,
     '--cm-band-head-top': `${frame.headTop}px`,
     '--cm-band-head-height': `${frame.headHeight}px`,
@@ -3138,8 +3301,10 @@ export function MapPanel(props: MapPanelProps): ReactNode {
   const searchField = (
     <label className="cm-search cm-band-search">
       <input
-        aria-label="搜索节点或对话"
-        placeholder={activeSpace === undefined ? '搜索节点或对话' : `在「${activeSpace.title}」中搜索`}
+        aria-label={t('common.searchNodesOrConversations')}
+        placeholder={activeSpace === undefined
+          ? t('common.searchNodesOrConversations')
+          : t('panel.search.inSpace', { space: displaySpaceTitle(t, activeSpace, state) })}
         value={query}
         autoFocus
         onChange={(event) => { setQuery(event.target.value) }}
@@ -3165,41 +3330,80 @@ export function MapPanel(props: MapPanelProps): ReactNode {
         }}
       />
       <span className="cm-band-search-hint" aria-hidden="true">
-        {searchView.items.length > 0 ? '↑↓ 选择' : 'Esc'}
+        {searchView.items.length > 0 ? t('panel.search.selectHint') : 'Esc'}
       </span>
     </label>
   )
 
-  // 空间切换入口住在第二行：它与节点列表同一条左缘（行内边距 + 1px 描边 +
-  // 按钮内边距 = 14px，和第一列工作区文件夹图标对齐），不再和窗口控件带抢
-  // 第一行的宽度，也因此不需要在窄带宽下隐藏。空会话没有第二行
-  // （compactHeader），那时它退回第一行，仍然只省略标签、不隐藏按钮。
-  // 菜单锚点跟着按钮的 rect 走，位置变化由它自己承担。
+  // 空间入口住在第二行，现在是一条面包屑：
   //
-  // The entry also carries the **active space's** own counts. The sidebar row's
-  // cluster is the whole-map total, so a reader can compare the two: anything in
-  // the sidebar that is missing here belongs to another space. That subtraction
-  // is the cheapest way to answer "did something happen where I am not looking?"
-  // without opening the menu, and it adds no second vocabulary — the same four
-  // categories, in the same order, with the same clearing rules.
+  //   [⌂ 全部空间 + Σ各空间状态簇]  ›  [当前空间 + 自身状态簇 + ⌄]
+  //
+  // 整条面包屑是一个控件：根段、分隔符、当前段、末尾 chevron 都在这一个
+  // button 里，点任意位置（包括「全部空间」后面的数字）都会打开空间菜单。
+  // 这样两段都没有死区，也不存在「哪个才是下拉」的问题；chevron 只出现一次，
+  // 放在行尾（与参考图一致），菜单锚定整条 rect 的左缘，位置稳定。
+  // 两段同屏，根 − 当前就是其他空间。状态簇沿用同一套四类与清零规则，根段只
+  // 从 Σ spaceRollups 算，因此「合计 = Σ 各空间 = 菜单逐行相加」由构造保证。
+  //
+  // 密度按带宽降级（见 spaceBreadcrumbDensities）：根段始终保留数字，先牺牲
+  // 当前段的簇，再让名字自己省略。空会话没有第二行（compactHeader），保持
+  // 原来的单按钮回落到第一行，只把 aria-label 补上当前空间名。
   const currentSpaceRollup = spaceRollups.get(activeSpaceId)
-  const spaceSwitcher = (
+  const currentSpaceTitle = activeSpace === undefined
+    ? t('common.space')
+    : displaySpaceTitle(t, activeSpace, state)
+  const densities = spaceBreadcrumbDensities(bandWidth, {
+    search: searchOpen,
+    singleSpace: orderedSpaces.length <= 1,
+  })
+  const openSpaceMenu = (event: ReactMouseEvent<HTMLButtonElement>): void => {
+    spaceTriggerRef.current = event.currentTarget
+    const rect = event.currentTarget.getBoundingClientRect()
+    setSpaceMenu(current => current === null ? { x: rect.left, y: rect.bottom + 6 } : null)
+  }
+  const compactSpaceSwitcher = (
     <button
       type="button"
       className="cm-space-btn"
       aria-haspopup="menu"
       aria-expanded={spaceMenu !== null}
-      title="切换空间"
-      onClick={(event) => {
-        const rect = event.currentTarget.getBoundingClientRect()
-        setSpaceMenu(current => current === null ? { x: rect.left, y: rect.bottom + 6 } : null)
-      }}
+      aria-label={t('panel.spaceSwitcherLabel', { space: currentSpaceTitle })}
+      title={t('panel.switchSpace')}
+      onClick={openSpaceMenu}
     >
       <LayersGlyph />
-      <span className="cm-space-name">{activeSpace?.title ?? '空间'}</span>
+      <span className="cm-space-name">{currentSpaceTitle}</span>
       {currentSpaceRollup !== undefined && currentSpaceRollup.total > 0 && (
-        <StatusRollupBadge rollup={currentSpaceRollup} density="cluster" scope="当前空间全部会话" />
+        <StatusRollupBadge rollup={currentSpaceRollup} density="cluster" scope={t('panel.scope.currentSpaceAll')} />
       )}
+      <ChevronGlyph />
+    </button>
+  )
+  const spaceBreadcrumb = (
+    <button
+      type="button"
+      className="cm-space-btn cm-crumb"
+      aria-haspopup="menu"
+      aria-expanded={spaceMenu !== null}
+      aria-label={t('panel.spaceSwitcherLabel', { space: currentSpaceTitle })}
+      title={t('panel.switchSpace')}
+      onClick={openSpaceMenu}
+    >
+      <span className="cm-crumb-root">
+        <HomeGlyph />
+        <span className="cm-crumb-root-label">{t('common.allSpaces')}</span>
+        {densities.root === 'cluster' && (
+          <StatusRollupBadge rollup={allSpaceRollup} density="cluster" scope={t('panel.scope.allSpacesAll')} />
+        )}
+      </span>
+      <span className="cm-crumb-sep" aria-hidden="true">›</span>
+      <span className="cm-crumb-current">
+        <span className="cm-space-name">{currentSpaceTitle}</span>
+        {densities.current !== 'none' && currentSpaceRollup !== undefined && (
+          <StatusRollupBadge rollup={currentSpaceRollup} density={densities.current} scope={t('panel.scope.currentSpaceAll')} />
+        )}
+      </span>
       <ChevronGlyph />
     </button>
   )
@@ -3208,8 +3412,8 @@ export function MapPanel(props: MapPanelProps): ReactNode {
     if (!mountFailed) return null
     return (
       <div className="cm-band-unavailable" role="status">
-        <span>对话树栏暂时无法挂载：产品的会话列结构没有提供可测量的锚点。</span>
-        <button type="button" className="cm-btn" onClick={() => { services.collapse?.() }}>收起对话树</button>
+        <span>{t('panel.mountFailed')}</span>
+        <button type="button" className="cm-btn" onClick={() => { services.collapse?.() }}>{t('panel.collapseTree')}</button>
       </div>
     )
   }
@@ -3229,7 +3433,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
         data-compact={compactHeader ? 'true' : undefined}
         style={bandStyle}
       >
-        <div className="cm-band-loading" role="status">正在加载对话树…</div>
+        <div className="cm-band-loading" role="status">{t('panel.loadingTree')}</div>
       </section>
     )
   }
@@ -3241,7 +3445,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
       data-compact={compactHeader ? 'true' : undefined}
       data-status-source={typeof props.useSessionStatus === 'function' ? 'live' : 'none'}
       style={bandStyle}
-      aria-label="对话树"
+      aria-label={t('common.panelTitle')}
     >
       {/* The band's top bar is this surface's window-chrome row. The shell's
           macOS drag contract is opt-in per row: ui-web's base.css declares the
@@ -3268,27 +3472,27 @@ export function MapPanel(props: MapPanelProps): ReactNode {
             <button
               type="button"
               className="cm-lead-icon"
-              title="新建会话"
-              aria-label="新建会话"
+              title={t('common.newSession')}
+              aria-label={t('common.newSession')}
               onClick={() => { newThread(newThreadKey()) }}
             >
               <NewChatGlyph />
             </button>
           )}
           <ViewToggle target="conversation" compact onSelect={() => { services.collapse?.() }} />
-          {compactHeader && spaceSwitcher}
+          {compactHeader && compactSpaceSwitcher}
           {compactHeader && searchOpen && searchField}
           <div className="cm-top-actions">
             {snapshot.phase === 'local' && (
-              <span className="cm-error" title="未连接 Host，对话树只保存在当前浏览器" style={{ opacity: 0.75 }}>本地模式</span>
+              <span className="cm-error" title={t('panel.localModeHint')} style={{ opacity: 0.75 }}>{t('common.localMode')}</span>
             )}
             {displayError !== '' && <span className="cm-error">{displayError}</span>}
             <button
               type="button"
               className="cm-btn cm-band-search-toggle"
               data-open={searchOpen ? 'true' : undefined}
-              title={searchOpen ? '关闭搜索' : '搜索节点或对话（⌘K）'}
-              aria-label={searchOpen ? '关闭搜索' : '搜索'}
+              title={searchOpen ? t('panel.search.close') : t('panel.search.openTitle')}
+              aria-label={searchOpen ? t('panel.search.close') : t('common.search')}
               aria-expanded={searchOpen}
               onClick={() => { if (searchOpen) closeSearch(); else setSearchOpen(true) }}
             >
@@ -3298,8 +3502,8 @@ export function MapPanel(props: MapPanelProps): ReactNode {
               <button
                 type="button"
                 className="cm-btn cm-band-refresh"
-                title="更多操作"
-                aria-label="更多操作"
+                title={t('panel.moreActions')}
+                aria-label={t('panel.moreActions')}
                 aria-haspopup="menu"
                 aria-expanded={overflowMenu !== null}
                 onClick={(event) => {
@@ -3322,7 +3526,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
         {/* 第二行保持与原生会话头的页签行等高；不搜索时它是空的，搜索时才就地展开输入。 */}
         {!compactHeader && (
           <div className="cm-band-row2">
-            {spaceSwitcher}
+            {spaceBreadcrumb}
             {searchOpen ? searchField : null}
           </div>
         )}
@@ -3394,7 +3598,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
       {spaceMenu !== null && (
         <>
           <div className="cm-backdrop" onClick={() => { setSpaceMenu(null) }} />
-          <div className="cm-menu cm-space-menu" style={{ left: spaceMenu.x, top: spaceMenu.y }} role="menu" aria-label="切换空间">
+          <div className="cm-menu cm-space-menu" style={{ left: spaceMenu.x, top: spaceMenu.y }} role="menu" aria-label={t('panel.switchSpace')}>
             {orderedSpaces.map(space => {
               const active = space.id === activeSpaceId
               return (
@@ -3405,12 +3609,15 @@ export function MapPanel(props: MapPanelProps): ReactNode {
                   role="menuitemradio"
                   aria-checked={active}
                   tabIndex={0}
-                  title={`${space.title} · ${String(workspaceCounts.get(space.id) ?? 0)} 个工作区`}
+                  title={t('panel.spaceRowTitle', {
+                    space: displaySpaceTitle(t, space, state),
+                    n: workspaceCounts.get(space.id) ?? 0,
+                  })}
                   onClick={() => { setSpaceMenu(null); switchSpace(space.id) }}
                   onKeyDown={(event) => { if (event.key === 'Enter') { setSpaceMenu(null); switchSpace(space.id) } }}
                 >
                   <span className="cm-space-check" aria-hidden="true">{active ? '✓' : ''}</span>
-                  <span className="cm-space-row-title">{space.title}</span>
+                  <span className="cm-space-row-title">{displaySpaceTitle(t, space, state)}</span>
                   <SpaceMenuTrailing
                     rollup={spaceRollups.get(space.id)}
                     workspaceCount={workspaceCounts.get(space.id) ?? 0}
@@ -3418,8 +3625,8 @@ export function MapPanel(props: MapPanelProps): ReactNode {
                   <button
                     type="button"
                     className="cm-icon-btn cm-space-row-menu"
-                    title="空间设置"
-                    aria-label="空间设置"
+                    title={t('panel.spaceSettings')}
+                    aria-label={t('panel.spaceSettings')}
                     onClick={(event) => {
                       event.stopPropagation()
                       const rect = event.currentTarget.getBoundingClientRect()
@@ -3433,9 +3640,9 @@ export function MapPanel(props: MapPanelProps): ReactNode {
               )
             })}
             <div className="cm-menu-sep" />
-            <button type="button" className="cm-menu-item" onClick={() => { setSpaceMenu(null); openSpaceCreate() }}>＋ 新建空间…</button>
+            <button type="button" className="cm-menu-item" onClick={() => { setSpaceMenu(null); openSpaceCreate() }}>{t('panel.newSpaceAction')}</button>
             {orderedSpaces.length <= 1 && (
-              <span className="cm-menu-note">空间用来给工作区分组：可以按工作 / 个人 / 家庭建多个。</span>
+              <span className="cm-menu-note">{t('panel.spaceCreateNote')}</span>
             )}
           </div>
         </>
@@ -3448,15 +3655,15 @@ export function MapPanel(props: MapPanelProps): ReactNode {
             className="cm-menu"
             style={{ right: overflowMenu.right, top: overflowMenu.top }}
             role="menu"
-            aria-label="更多操作"
+            aria-label={t('panel.moreActions')}
           >
             <button
               type="button"
               className="cm-menu-item"
-              title="重新拉取宿主会话列表（仅在会话列表不更新时使用）"
+              title={t('panel.refreshSessionsHint')}
               onClick={() => { setOverflowMenu(null); void services.sessions.refresh?.() }}
             >
-              刷新会话列表
+              {t('panel.refreshSessions')}
             </button>
           </div>
         </>
@@ -3465,13 +3672,13 @@ export function MapPanel(props: MapPanelProps): ReactNode {
       {draft !== null && (
         <>
           <div className="cm-backdrop cm-backdrop--dialog" onClick={closeDraft} />
-          <div className={dialogClass(draft)} role="dialog" aria-modal="true" aria-label={dialogTitle(draft)}>
+          <div className={dialogClass(draft)} role="dialog" aria-modal="true" aria-label={dialogTitle(t, draft)}>
             <div className="cm-card">
-              <h3>{dialogTitle(draft)}</h3>
+              <h3>{dialogTitle(t, draft)}</h3>
               {draft.kind === 'node' && (
                 <>
                   <div className="cm-field">
-                    <label htmlFor="cm-draft-title">名称</label>
+                    <label htmlFor="cm-draft-title">{t('common.name')}</label>
                     <input
                       id="cm-draft-title"
                       className="cm-input"
@@ -3484,7 +3691,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
                     />
                   </div>
                   <div className="cm-field">
-                    <label htmlFor="cm-draft-desc">说明</label>
+                    <label htmlFor="cm-draft-desc">{t('common.description')}</label>
                     <textarea
                       id="cm-draft-desc"
                       className="cm-textarea"
@@ -3493,7 +3700,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
                     />
                   </div>
                   <div className="cm-field">
-                    <label htmlFor="cm-draft-parent">父节点</label>
+                    <label htmlFor="cm-draft-parent">{t('panel.parentNode')}</label>
                     <select
                       id="cm-draft-parent"
                       className="cm-select"
@@ -3508,7 +3715,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
                         })
                       }}
                     >
-                      <option value="">（工作区顶层）</option>
+                      <option value="">{t('common.workspaceTopLevel')}</option>
                       {parentOptions.map(node => <option key={node.id} value={node.id}>{breadcrumb(state, node.id)}</option>)}
                     </select>
                   </div>
@@ -3522,14 +3729,14 @@ export function MapPanel(props: MapPanelProps): ReactNode {
                       onChange={(next) => { setDraft({ ...draft, beforeNodeId: next === '' ? null : next }) }}
                     />
                   )}
-                  <p className="cm-hint">所属工作区：{dialogWorkspaceLabel}</p>
+                  <p className="cm-hint">{t('panel.dialogWorkspace', { workspace: dialogWorkspaceLabel })}</p>
                 </>
               )}
               {draft.kind === 'workspace-create' && (
                 <>
-                  <p className="cm-hint">选择或输入一个已存在的目录。它会同时出现在 DeepSeek Harness 的「工作区」列表里，两边保持一致。</p>
+                  <p className="cm-hint">{t('panel.workspaceCreateHint')}</p>
                   <div className="cm-field">
-                    <label htmlFor="cm-workspace-path">目录</label>
+                    <label htmlFor="cm-workspace-path">{t('panel.directory')}</label>
                     <div className="cm-field-row">
                       <input
                         id="cm-workspace-path"
@@ -3543,18 +3750,18 @@ export function MapPanel(props: MapPanelProps): ReactNode {
                         onCompositionEnd={onCompositionEnd}
                       />
                       {services.pickDirectory !== undefined && (
-                        <button type="button" className="cm-btn" disabled={picking} onClick={chooseDirectory}>选择目录…</button>
+                        <button type="button" className="cm-btn" disabled={picking} onClick={chooseDirectory}>{t('panel.chooseDirectory')}</button>
                       )}
                     </div>
                     {picking && (
-                      <p className="cm-hint">已请求目录选择器；若它没有响应，可直接在「目录」框输入绝对路径。</p>
+                      <p className="cm-hint">{t('panel.pickerPending')}</p>
                     )}
                   </div>
                 </>
               )}
               {draft.kind === 'workspace-rename' && (
                 <div className="cm-field">
-                  <label htmlFor="cm-workspace-title">工作区名称</label>
+                  <label htmlFor="cm-workspace-title">{t('panel.workspaceName')}</label>
                   <input
                     id="cm-workspace-title"
                     className="cm-input"
@@ -3568,21 +3775,19 @@ export function MapPanel(props: MapPanelProps): ReactNode {
                 </div>
               )}
               {draft.kind === 'workspace-delete' && (
-                <p className="cm-hint">
-                  删除工作区「{draft.title}」？只会注销这条工作区登记，会话记录和目录里的文件都会保留；它的主题会落到「未分组」。
-                </p>
+                <p className="cm-hint">{t('panel.workspaceDeleteConfirm', { title: draft.title })}</p>
               )}
               {draft.kind === 'space-create' && (
                 <>
-                  <p className="cm-hint">空间用来给工作区分组，例如「工作空间」「个人项目空间」「家庭空间」。</p>
+                  <p className="cm-hint">{t('panel.spaceCreateHint')}</p>
                   <div className="cm-field">
-                    <label htmlFor="cm-space-title">空间名称</label>
+                    <label htmlFor="cm-space-title">{t('panel.spaceName')}</label>
                     <input
                       id="cm-space-title"
                       className="cm-input"
                       value={draft.title}
                       autoFocus
-                      placeholder="例如：工作空间"
+                      placeholder={t('panel.spaceNamePlaceholder')}
                       onChange={(event) => { setDraft({ kind: 'space-create', title: event.target.value }) }}
                       onKeyDown={commitOnEnter}
                       onCompositionStart={onCompositionStart}
@@ -3593,7 +3798,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
               )}
               {draft.kind === 'space-rename' && (
                 <div className="cm-field">
-                  <label htmlFor="cm-space-rename-title">空间名称</label>
+                  <label htmlFor="cm-space-rename-title">{t('panel.spaceName')}</label>
                   <input
                     id="cm-space-rename-title"
                     className="cm-input"
@@ -3607,15 +3812,13 @@ export function MapPanel(props: MapPanelProps): ReactNode {
                 </div>
               )}
               {draft.kind === 'space-delete' && (
-                <p className="cm-hint">
-                  删除空间「{draft.title}」？它的工作区与未分组对话都会回到默认空间；主题、会话记录和目录里的文件都不受影响。
-                </p>
+                <p className="cm-hint">{t('panel.spaceDeleteConfirm', { title: draft.title })}</p>
               )}
               {draft.kind === 'workspace-space' && (
                 <>
-                  <p className="cm-hint">把工作区「{draft.title}」放到哪个空间？不会改变它下面的主题与会话。</p>
+                  <p className="cm-hint">{t('panel.workspaceSpaceHint', { title: draft.title })}</p>
                   <div className="cm-field">
-                    <label htmlFor="cm-workspace-space">空间</label>
+                    <label htmlFor="cm-workspace-space">{t('common.space')}</label>
                     <select
                       id="cm-workspace-space"
                       className="cm-select"
@@ -3623,7 +3826,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
                       onChange={(event) => { setDraft({ kind: 'workspace-space', workspaceId: draft.workspaceId, title: draft.title, spaceId: event.target.value }) }}
                     >
                       {orderedSpaces.map(space => (
-                        <option key={space.id} value={space.id}>{space.title}{space.id === defaultSpaceId ? '（默认）' : ''}</option>
+                        <option key={space.id} value={space.id}>{displaySpaceTitle(t, space, state)}{space.id === defaultSpaceId ? t('panel.defaultSuffix') : ''}</option>
                       ))}
                     </select>
                   </div>
@@ -3631,9 +3834,9 @@ export function MapPanel(props: MapPanelProps): ReactNode {
               )}
               {draft.kind === 'thread-space' && (
                 <>
-                  <p className="cm-hint">把「{draft.title}」归入哪个空间？它与工作区无关，宿主侧仍显示在「未分组」里。</p>
+                  <p className="cm-hint">{t('panel.threadSpaceHint', { title: draft.title })}</p>
                   <div className="cm-field">
-                    <label htmlFor="cm-thread-space">空间</label>
+                    <label htmlFor="cm-thread-space">{t('common.space')}</label>
                     <select
                       id="cm-thread-space"
                       className="cm-select"
@@ -3641,7 +3844,7 @@ export function MapPanel(props: MapPanelProps): ReactNode {
                       onChange={(event) => { setDraft({ kind: 'thread-space', sessionId: draft.sessionId, title: draft.title, spaceId: event.target.value }) }}
                     >
                       {orderedSpaces.map(space => (
-                        <option key={space.id} value={space.id}>{space.title}{space.id === defaultSpaceId ? '（默认）' : ''}</option>
+                        <option key={space.id} value={space.id}>{displaySpaceTitle(t, space, state)}{space.id === defaultSpaceId ? t('panel.defaultSuffix') : ''}</option>
                       ))}
                     </select>
                   </div>
@@ -3650,7 +3853,9 @@ export function MapPanel(props: MapPanelProps): ReactNode {
               {draft.kind === 'move-thread' && (
                 <>
                   <p className="cm-hint">
-                    把「{threadOfSession(state, draft.sessionId)?.title ?? '这条对话'}」移到哪个节点下？只在它所属工作区内移动，不会改变它的工作区归属。
+                    {t('panel.moveThreadHint', {
+                      title: threadOfSession(state, draft.sessionId)?.title ?? t('panel.thisConversation'),
+                    })}
                   </p>
                   <MoveThreadField
                     state={state}
@@ -3672,21 +3877,21 @@ export function MapPanel(props: MapPanelProps): ReactNode {
                   onClick={submitDraft}
                 >
                   {busy
-                    ? '处理中…'
+                    ? t('panel.working')
                     : draft.kind === 'workspace-create' || draft.kind === 'space-create'
-                      ? '创建'
+                      ? t('common.create')
                       : draft.kind === 'workspace-delete' || draft.kind === 'space-delete'
-                        ? '删除'
-                        : draft.kind === 'move-thread' ? '移动' : '保存'}
+                        ? t('common.delete')
+                        : draft.kind === 'move-thread' ? t('common.move') : t('common.save')}
                 </button>
-                <button type="button" className="cm-btn" onClick={closeDraft}>取消</button>
+                <button type="button" className="cm-btn" onClick={closeDraft}>{t('common.cancel')}</button>
                 {draft.kind === 'node' && draft.id !== undefined && (
                   <button
                     type="button"
                     className="cm-btn"
                     onClick={() => { removeNode(draft.id as string); closeDraft() }}
                   >
-                    删除
+                    {t('common.delete')}
                   </button>
                 )}
               </div>
@@ -3700,18 +3905,19 @@ export function MapPanel(props: MapPanelProps): ReactNode {
 
 /**
  * Title one dialog.
+ * @param t - the active translator.
  * @param draft - the open dialog.
  * @returns its heading.
  */
-function dialogTitle(draft: Draft): string {
-  if (draft.kind === 'workspace-create') return '新建工作区'
-  if (draft.kind === 'workspace-rename') return '重命名工作区'
-  if (draft.kind === 'workspace-delete') return '删除工作区'
-  if (draft.kind === 'space-create') return '新建空间'
-  if (draft.kind === 'space-rename') return '重命名空间'
-  if (draft.kind === 'space-delete') return '删除空间'
-  if (draft.kind === 'workspace-space') return '设置所属空间'
-  if (draft.kind === 'thread-space') return '归入空间'
-  if (draft.kind === 'move-thread') return '移动对话'
-  return draft.id === undefined ? '新建节点' : '编辑节点'
+function dialogTitle(t: Translate, draft: Draft): string {
+  if (draft.kind === 'workspace-create') return t('panel.dialog.workspaceCreate')
+  if (draft.kind === 'workspace-rename') return t('panel.dialog.workspaceRename')
+  if (draft.kind === 'workspace-delete') return t('panel.dialog.workspaceDelete')
+  if (draft.kind === 'space-create') return t('panel.dialog.spaceCreate')
+  if (draft.kind === 'space-rename') return t('panel.dialog.spaceRename')
+  if (draft.kind === 'space-delete') return t('panel.dialog.spaceDelete')
+  if (draft.kind === 'workspace-space') return t('panel.dialog.workspaceSpace')
+  if (draft.kind === 'thread-space') return t('panel.dialog.threadSpace')
+  if (draft.kind === 'move-thread') return t('panel.dialog.moveThread')
+  return draft.id === undefined ? t('panel.dialog.nodeCreate') : t('panel.dialog.nodeEdit')
 }

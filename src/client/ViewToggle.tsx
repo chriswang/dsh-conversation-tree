@@ -40,6 +40,7 @@
 import type { ReactNode } from 'react'
 
 import { CollapseGlyph, MapGlyph } from './Glyph.js'
+import { useT } from './locale.js'
 
 /** The presentation the click switches to, or the band it collapses. */
 export type ViewTarget = 'map' | 'expand' | 'conversation'
@@ -74,9 +75,14 @@ export interface ViewToggleProps {
  * @returns the shared control.
  */
 export function ViewToggle({ target, onSelect, compact = false }: ViewToggleProps): ReactNode {
+  const t = useT()
   const isMap = target !== 'conversation'
-  const label = target === 'conversation' ? '收起' : target === 'expand' ? '展开对话树' : '对话树'
-  const name = target === 'conversation' ? '收起对话树栏，会话恢复整宽' : target === 'expand' ? '展开对话树' : '展开对话树栏'
+  const label = target === 'conversation'
+    ? t('common.collapse')
+    : target === 'expand' ? t('view.expand') : t('common.panelTitle')
+  const name = target === 'conversation'
+    ? t('view.collapseName')
+    : target === 'expand' ? t('view.expand') : t('view.expandName')
   const glyphSize = compact ? 16 : 14
   return (
     <button

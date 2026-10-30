@@ -23,10 +23,15 @@ import {
   followNativeNavigation, heldOverlay, insertionLineStyle, moveFailureMessage, moveTreeRows,
   planFromDecision, showsStatusRollup, siblingTargets, springLoadTarget, threadMenuModel, threadMoveChange,
   threadMoveDefault, threadMoveIsNoop, threadMoveOptions, treeStep, visibleTreeRows, SpaceMenuTrailing,
+  overlayOffset, spaceBreadcrumbDensities,
 } from '../lib/panel.js'
 import { MapError } from '../lib/model.js'
 import { ensureDefaultSpace, parseMapState, syncCatalog } from '../lib/model.js'
 import { createStatusLedger } from '../lib/status-ledger.js'
+import { createTranslator, zh } from '../lib/locales.js'
+
+/** The Simplified Chinese translator the exported copy builders are asserted against. */
+const t = createTranslator(zh)
 
 /** Two hours ago, as an ISO stamp. */
 function ago(hours) {
@@ -710,15 +715,16 @@ function rowMarkup(markup, kind) {
   return markup.slice(start, threadStart === -1 ? start + 1500 : threadStart)
 }
 
-test('the very first render bootstraps one default space and shows it in the second row', () => {
+test('the very first render bootstraps one default space in the breadcrumb’s current segment', () => {
   const markup = render(store(undefined, undefined))
-  assert.ok(markup.includes('默认空间'), 'the switcher names the default space')
+  assert.ok(markup.includes('默认空间'), 'the current segment names the default space')
   const viewToggle = markup.indexOf('cm-view-toggle')
-  const spaceSwitcher = markup.indexOf('cm-space-btn')
+  const spaceSwitcher = markup.indexOf('cm-space-btn cm-crumb')
   const searchToggle = markup.indexOf('cm-band-search-toggle')
   assert.ok(viewToggle !== -1 && spaceSwitcher !== -1 && searchToggle !== -1)
   const row2 = markup.indexOf('cm-band-row2')
-  assert.ok(row2 !== -1 && row2 < spaceSwitcher, 'the space switcher leads the second row, on the node list rail')
+  assert.ok(row2 !== -1 && row2 < spaceSwitcher, 'the breadcrumb leads the second row, on the node list rail')
+  assert.ok(spaceSwitcher < markup.indexOf('cm-crumb-root'), 'the whole bar is the space switcher')
   assert.ok(viewToggle < searchToggle, 'the single view button leads the head row, then the search action')
   assert.ok(!markup.includes('cm-brand'), 'the band carries no brand of its own')
 })
@@ -789,16 +795,32 @@ test('the resize handle is a child of the band, after the body, so the header se
   )
 })
 
-test('a document with spaces shows the remembered space in the switcher', () => {
+test('a document with spaces shows both segments inside one breadcrumb control', () => {
   const markup = render(store(SPACES_MAP, view({ activeSpace: 'sp-work' })))
-  const switcher = markup.slice(markup.indexOf('cm-space-btn'), markup.indexOf('cm-space-btn') + 500)
-  assert.ok(switcher.includes('工作空间'), 'the active space is named on the button')
+  const crumbStart = markup.indexOf('cm-space-btn cm-crumb')
+  assert.notEqual(crumbStart, -1, 'the breadcrumb control is rendered')
+  const crumbOpen = markup.lastIndexOf('<button', crumbStart)
+  const crumbClose = markup.indexOf('</button>', crumbStart)
+  const crumb = markup.slice(crumbOpen, crumbClose + '</button>'.length)
+  assert.ok(crumb.includes('全部空间'), 'the root segment names the whole map')
+  assert.ok(crumb.includes('工作空间'), 'the current segment names the active space')
+  assert.match(
+    crumb,
+    /<button[^>]*class="cm-space-btn cm-crumb"[^>]*aria-haspopup="menu"/,
+    'the whole bar is the space menu trigger',
+  )
+  assert.equal((crumb.match(/<button/g) ?? []).length, 1, 'one control: no nested buttons')
+  assert.ok(crumb.includes('cm-crumb-root'), 'the root segment lives inside the control')
+  assert.ok(crumb.includes('cm-crumb-root-label'), 'the root label is visible text, not a nested trigger')
+  assert.ok(crumb.includes('cm-crumb-sep'), 'a separator sits between the two segments')
+  assert.ok(crumb.includes('cm-crumb-current'), 'the current segment lives inside the control')
+  assert.ok(crumb.includes('cm-chevron-glyph'), 'the chevron sits once, at the end of the control')
 })
 
-test('the space entry carries the active space’s status, for comparing with the sidebar total', () => {
-  // The sidebar cluster is the whole-map count; this button is the active space's.
-  // A category missing from the button therefore belongs to another space, which
-  // is the comparison the reader asked for. The two must use one counting rule.
+test('the breadcrumb reads the whole map on the root and only the active space on the current segment', () => {
+  // The root totals every space (the sidebar row's whole-map figure, by
+  // construction), while the current segment repeats the tree's scope. The two
+  // must use one counting rule; the difference is the other spaces' work.
   const markup = render(store(SPACES_MAP, view({ activeSpace: 'sp-work' })), {
     useSessionStatus: useStatus({
       s1: { pendingInteraction: { kind: 'approval' } },
@@ -806,23 +828,64 @@ test('the space entry carries the active space’s status, for comparing with th
       s3: { completionUnread: true },
     }),
   })
-  const start = markup.indexOf('cm-space-btn')
-  const switcher = markup.slice(start, start + 900)
-  assert.ok(switcher.includes('cm-rollup'), 'the entry carries the same cluster as the rows')
+  const rootStart = markup.indexOf('cm-crumb-root')
+  const currentStart = markup.indexOf('cm-crumb-current')
+  const root = markup.slice(rootStart, currentStart)
+  const current = markup.slice(currentStart, currentStart + 900)
   assert.ok(
-    switcher.includes('aria-label="会话状态：1 条待响应，1 条运行中（当前空间全部会话）"'),
-    'only the active space’s conversations are counted',
+    root.includes('aria-label="会话状态：1 条待响应，1 条已完成，1 条运行中（全部空间全部会话）"'),
+    'the root totals every space',
   )
-  assert.ok(!switcher.includes('条已完成'), 'a conversation in another space is not on this button')
+  assert.ok(
+    current.includes('aria-label="会话状态：1 条待响应，1 条运行中（当前空间全部会话）"'),
+    'the current segment counts only the active space',
+  )
+  assert.ok(!current.includes('条已完成'), 'a conversation in another space is not on the current segment')
 })
 
-test('an idle active space leaves the space entry quiet', () => {
+test('an idle active space leaves the current segment quiet while the root keeps the whole map', () => {
   const markup = render(store(SPACES_MAP, view({ activeSpace: 'sp-empty' })), {
     useSessionStatus: useStatus({ s1: { pendingInteraction: { kind: 'approval' } } }),
   })
-  const start = markup.indexOf('cm-space-btn')
-  const switcher = markup.slice(start, start + 700)
-  assert.ok(!switcher.includes('cm-rollup'), 'nothing in this space needs a look, so nothing is added')
+  const rootStart = markup.indexOf('cm-crumb-root')
+  const currentStart = markup.indexOf('cm-crumb-current')
+  const root = markup.slice(rootStart, currentStart)
+  const current = markup.slice(currentStart, currentStart + 700)
+  assert.ok(root.includes('cm-rollup'), 'the root still totals the whole map')
+  assert.ok(!current.includes('cm-rollup'), 'nothing in this space needs a look, so nothing is added')
+})
+
+test('a single-space document spends no cluster on the current segment', () => {
+  // First run: the root and the current segment would print exactly the same
+  // numbers. The quieter confirmed form keeps the current segment's name only.
+  const markup = render(store(MAP, undefined), {
+    useSessionStatus: useStatus({ s1: { pendingInteraction: { kind: 'approval' } } }),
+  })
+  const currentStart = markup.indexOf('cm-crumb-current')
+  assert.notEqual(currentStart, -1, 'the single-space breadcrumb still shows where you are')
+  assert.ok(!markup.slice(currentStart, currentStart + 700).includes('cm-rollup'), 'the repeated cluster is gone')
+  const rootStart = markup.indexOf('cm-crumb-root')
+  assert.ok(markup.slice(rootStart, currentStart).includes('cm-rollup'), 'the root keeps the whole-map total')
+})
+
+test('a narrow band renders the current cluster as dots and a narrower one drops it', () => {
+  const status = useStatus({ s1: { pendingInteraction: { kind: 'approval' } } })
+  const dots = render(store(SPACES_MAP, view({ activeSpace: 'sp-work', mapWidth: 440 })), { useSessionStatus: status })
+  const dotStart = dots.indexOf('cm-crumb-current')
+  assert.ok(dots.slice(dotStart, dotStart + 900).includes('cm-rollup-dots'), '440px keeps the hint as dots')
+  const none = render(store(SPACES_MAP, view({ activeSpace: 'sp-work', mapWidth: 400 })), { useSessionStatus: status })
+  const noneStart = none.indexOf('cm-crumb-current')
+  assert.ok(!none.slice(noneStart, noneStart + 900).includes('cm-rollup'), '400px drops the current cluster')
+})
+
+test('the breadcrumb density ladder gives the current segment up before the root', () => {
+  assert.deepEqual(spaceBreadcrumbDensities(480, { search: false, singleSpace: false }), { root: 'cluster', current: 'cluster' })
+  assert.deepEqual(spaceBreadcrumbDensities(479, { search: false, singleSpace: false }), { root: 'cluster', current: 'dots' })
+  assert.deepEqual(spaceBreadcrumbDensities(420, { search: false, singleSpace: false }), { root: 'cluster', current: 'dots' })
+  assert.deepEqual(spaceBreadcrumbDensities(419, { search: false, singleSpace: false }), { root: 'cluster', current: 'none' })
+  assert.deepEqual(spaceBreadcrumbDensities(320, { search: false, singleSpace: false }), { root: 'cluster', current: 'none' })
+  assert.deepEqual(spaceBreadcrumbDensities(480, { search: true, singleSpace: false }), { root: 'none', current: 'none' })
+  assert.deepEqual(spaceBreadcrumbDensities(480, { search: false, singleSpace: true }), { root: 'cluster', current: 'none' })
 })
 
 test('the target column only lists the Workspaces of the active space, in Host order', () => {
@@ -1015,8 +1078,26 @@ test('without a measured narrowed seat the band draws no new-session button', ()
 test('an unmeasured frame starts the band at the conversation inset floor', () => {
   const markup = render(store(MAP, view({ openSessionId: 's1' })))
   assert.match(markup, /style="[^"]*--cm-band-inset:20px/, 'the fallback frame leaves the Conversation header\'s own inset')
+  assert.match(markup, /style="[^"]*top:0;/, 'the band starts at its measured box, not at the overlay layer edge')
   assert.ok(!markup.includes('--cm-band-inset:160px'), 'the published clearance is not assumed when it cannot be read')
   assert.ok(!markup.includes('--cm-band-inset:124px'), 'and the narrowed-seat inset is never assumed before measurement')
+})
+
+/**
+ * The band's box is measured against the frame-wide overlay layer.
+ *
+ * macOS/Web: the overlay starts at the frame's edge and so does the Conversation
+ * column, so the two coordinate systems agree and the old numbers are unchanged.
+ * Windows desktop: the shell keeps its caption row in the frame's padding, while
+ * the overlay still spans the frame's border box — the Conversation column (and
+ * with it the band) starts below the overlay's top edge. Measuring `left` from
+ * the layer but `top` from the conversation would shift every band row up by the
+ * caption-row height; both offsets come from `overlayOffset` instead.
+ */
+test('the band box is measured in the overlay layer, including the Windows caption row', () => {
+  assert.deepEqual(overlayOffset({ left: 0, top: 0 }, { left: 56, top: 0 }), { left: 56, top: 0 })
+  assert.deepEqual(overlayOffset({ left: 0, top: 0 }, { left: 56, top: 40 }), { left: 56, top: 40 })
+  assert.deepEqual(overlayOffset({ left: 10.4, top: 2.6 }, { left: 66.6, top: 62.6 }), { left: 56, top: 60 })
 })
 
 /* ── subagent navigation ────────────────────────────────────────────────── */
@@ -1154,18 +1235,18 @@ const SUBAGENT_THREAD_MAP = {
 test('a conversation menu offers the one-step move and nothing that depends on the selection', () => {
   const state = doc(SHORTCUT_MAP)
   assert.deepEqual(
-    threadMenuModel(state, threadOf(SHORTCUT_MAP, 's1')),
+    threadMenuModel(state, threadOf(SHORTCUT_MAP, 's1'), t),
     { move: true, notice: null },
     'a filed conversation offers the picker and nothing else (BL-1: its Workspace row is in the picker)',
   )
   for (const gone of ['quickTarget', 'unassign']) {
     assert.ok(
-      !(gone in threadMenuModel(state, threadOf(SHORTCUT_MAP, 's1'))),
+      !(gone in threadMenuModel(state, threadOf(SHORTCUT_MAP, 's1'), t)),
       `the ${gone} entry is gone from the model, so no render path can reach it`,
     )
   }
   assert.deepEqual(
-    threadMenuModel(state, threadOf(SHORTCUT_MAP, 's3')),
+    threadMenuModel(state, threadOf(SHORTCUT_MAP, 's3'), t),
     { move: true, notice: null },
     'an unfiled conversation is offered the same single entry, with nothing to explain',
   )
@@ -1179,18 +1260,18 @@ test('the resting band offers no shortcut or unfile entry at all', () => {
 
 test('a subagent row offers no move of its own and says why', () => {
   const state = doc(SUBAGENT_THREAD_MAP)
-  const recorded = threadMenuModel(state, threadOf(SUBAGENT_THREAD_MAP, 'child'))
+  const recorded = threadMenuModel(state, threadOf(SUBAGENT_THREAD_MAP, 'child'), t)
   assert.deepEqual(recorded, { move: false, notice: '子智能体会话由它的父对话带出来，不能单独移动。' })
 
   const byOrigin = { ...state, subagentSessionIds: [] }
   assert.equal(
-    threadMenuModel(byOrigin, threadOf(SUBAGENT_THREAD_MAP, 'child')).move,
+    threadMenuModel(byOrigin, threadOf(SUBAGENT_THREAD_MAP, 'child'), t).move,
     false,
     'the catalog origin alone is enough while the ledger is not written yet',
   )
 
   const filedChild = { ...state, threads: state.threads.map(thread => thread.sessionId === 'child' ? { ...thread, nodeId: 'n1' } : thread) }
-  const filed = threadMenuModel(filedChild, filedChild.threads.find(thread => thread.sessionId === 'child'))
+  const filed = threadMenuModel(filedChild, filedChild.threads.find(thread => thread.sessionId === 'child'), t)
   assert.equal(filed.move, false, 'a filed subagent row is offered nothing either — the model refuses that write')
   assert.match(filed.notice, /子智能体/, 'and it still says what it is')
 })
@@ -1243,7 +1324,7 @@ test('a destination the model refuses is never the default', () => {
 })
 
 test('the move picker lists the Workspace row first, then every node of that Workspace', () => {
-  assert.deepEqual(threadMoveOptions(doc(MAP), 's1', 'w1'), [
+  assert.deepEqual(threadMoveOptions(doc(MAP), 's1', 'w1', t), [
     { value: '', label: '（工作区顶层）', disabled: false },
     { value: 'n1', label: '外贸探索', disabled: false },
     { value: 'n2', label: '外贸探索 / 获客方式', disabled: false },
@@ -1252,13 +1333,13 @@ test('the move picker lists the Workspace row first, then every node of that Wor
 
 test('a Workspace with no nodes still offers the Workspace row', () => {
   const empty = { version: 2, revision: 1, nodes: [], threads: [] }
-  assert.deepEqual(threadMoveOptions(doc(empty), 's1', 'w1'), [
+  assert.deepEqual(threadMoveOptions(doc(empty), 's1', 'w1', t), [
     { value: '', label: '（工作区顶层）', disabled: false },
   ], 'a conversation can always be left directly under its Workspace')
 })
 
 test('the picker offers only the conversation own Workspace, and disables what the model would refuse', () => {
-  const options = threadMoveOptions(doc(SPACES_MAP), 's2', null)
+  const options = threadMoveOptions(doc(SPACES_MAP), 's2', null, t)
   assert.deepEqual(options.map(option => option.value), ['', 'u1'], 'the ungrouped bucket lists only its own legacy topics')
   assert.ok(!options.some(option => option.value === 'n1'), 'another Workspace node is never offered')
   assert.equal(options[1].disabled, true, 'a loose conversation of another space cannot file itself in a default-space topic')
@@ -1545,14 +1626,14 @@ test('a landed move brings its row, its column and the highlight along', () => {
 
 test('a refused move is restated in the reader own vocabulary', () => {
   assert.equal(
-    moveFailureMessage(new MapError('NOT_FOUND', '节点已不存在，请刷新。')),
+    moveFailureMessage(t, new MapError('NOT_FOUND', '节点已不存在，请刷新。')),
     '目标节点已不存在，本次移动没有生效。',
   )
-  assert.equal(moveFailureMessage(new MapError('DEPTH', '最多支持 12 层。')), '这次移动会让层级超过 12 层。')
-  assert.equal(moveFailureMessage(new MapError('ANCHOR', '锚点不在目标位置下')), '插入位置已失效，请重试。')
-  assert.equal(moveFailureMessage(new MapError('WORKSPACE', '不能把节点移动到其他工作区的节点下。')), '不能移到别的工作区。')
-  assert.equal(moveFailureMessage(new MapError('CYCLE', '不能移到自己下面。')), '不能移到自己下面。', 'an unmapped refusal keeps the model wording')
-  assert.equal(moveFailureMessage(new Error('boom')), 'boom', 'a transport failure is not flattened into a move message')
+  assert.equal(moveFailureMessage(t, new MapError('DEPTH', '最多支持 12 层。')), '这次移动会让层级超过 12 层。')
+  assert.equal(moveFailureMessage(t, new MapError('ANCHOR', '锚点不在目标位置下')), '插入位置已失效，请重试。')
+  assert.equal(moveFailureMessage(t, new MapError('WORKSPACE', '不能把节点移动到其他工作区的节点下。')), '不能移到别的工作区。')
+  assert.equal(moveFailureMessage(t, new MapError('CYCLE', '不能移到自己下面。')), '不能移到自己下面。', 'an unmapped refusal keeps the model wording')
+  assert.equal(moveFailureMessage(t, new Error('boom')), 'boom', 'a transport failure is not flattened into a move message')
 })
 
 /* ── D9: where a node lands among its siblings ──────────────────────────── */
@@ -1588,7 +1669,7 @@ test('the position picker lists the siblings a node can go in front of', () => {
 /* ── BL-2/BL-3: the tree, as data and as markup ─────────────────────────── */
 
 test('the move tree keeps the document shape: the Workspace row, then topics by depth', () => {
-  const rows = moveTreeRows(doc(MAP), 's1', 'w1')
+  const rows = moveTreeRows(doc(MAP), 's1', 'w1', t)
   assert.deepEqual(
     rows.map(row => [row.key, row.depth, row.hasChildren]),
     [['', 0, false], ['n1', 1, true], ['n2', 2, false]],
@@ -1598,12 +1679,12 @@ test('the move tree keeps the document shape: the Workspace row, then topics by 
   assert.equal(rows[0].nodeId, null)
   assert.ok(rows.every(row => row.disabled === false), 'every destination of its own Workspace is available')
 
-  const refused = moveTreeRows(doc(SPACES_MAP), 's2', null)
+  const refused = moveTreeRows(doc(SPACES_MAP), 's2', null, t)
   assert.deepEqual(refused.map(row => [row.key, row.depth, row.disabled]), [['', 0, false], ['u1', 1, true]])
 })
 
 test('folding a branch hides its subtree, and the cursor steps over refusals', () => {
-  const rows = moveTreeRows(doc(MAP), 's1', 'w1')
+  const rows = moveTreeRows(doc(MAP), 's1', 'w1', t)
   assert.deepEqual(
     visibleTreeRows(rows, new Set(['n1'])).map(row => row.key),
     ['', 'n1'],

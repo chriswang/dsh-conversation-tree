@@ -234,7 +234,7 @@ test('a transport failure keeps the mutation queued and a retry commits it', asy
   store.update(doc => createNode(doc, { parentId: null, workspaceId: 'w1', title: 'retry me', id: 'n1' }).state)
   await clock.fireTimeouts()
   assert.equal(store.getSnapshot().pending, 1, 'mutation stays queued')
-  assert.match(store.getSnapshot().error ?? '', /同步中断/)
+  assert.equal(store.getSnapshot().error?.kind, 'sync-retry')
   await clock.fireTimeouts()
   assert.equal(store.getSnapshot().pending, 0)
   assert.equal(host.document.doc.nodes[0].title, 'retry me')

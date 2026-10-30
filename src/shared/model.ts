@@ -154,8 +154,19 @@ export const WORKSPACE_SELECTION_PREFIX = '@ws:'
 /** Prefix shared by the per-space "ungrouped" row keys (except the default space). */
 export const LOOSE_ROW_PREFIX = '@loose:'
 
-/** Title of the space the plugin creates on first use. */
-export const DEFAULT_SPACE_TITLE = '默认空间'
+/**
+ * Stored title marker of the space the plugin creates on first use.
+ *
+ * This is document data, not display copy: the label shown for it comes from the
+ * client dictionary (`common.defaultSpace`), and a renamed space renders its
+ * stored title verbatim. Keeping the marker language-neutral is what lets a
+ * document move between languages without rewriting user data; the legacy
+ * Chinese marker is migrated on read (see `parseMapState`).
+ */
+export const DEFAULT_SPACE_TITLE = '@default-space'
+
+/** The Chinese marker written by versions before the locale refactor. */
+const LEGACY_DEFAULT_SPACE_TITLE = '默认空间'
 
 /** Limits mirroring the plugin's stated first-version bounds. */
 export const MAX_DEPTH = 12
@@ -165,9 +176,13 @@ export const MAX_DESCRIPTION = 6000
 export const MAX_SPACES = 50
 export const MAX_SPACE_TITLE = 40
 
-/** A rejected mutation, carrying a stable code for the UI to explain. */
+/** A rejected mutation, carrying a stable code the render site explains. */
 export class MapError extends Error {
-  constructor(readonly code: string, message: string) {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly params?: Readonly<Record<string, string | number>>,
+  ) {
     super(message)
     this.name = 'MapError'
   }
@@ -184,7 +199,7 @@ export function emptyMap(): MapState {
 /** Read one node, throwing when the caller names a node that is gone. */
 function requireNode(state: MapState, id: string): MapNode {
   const node = state.nodes.find(candidate => candidate.id === id)
-  if (node === undefined) throw new MapError('NOT_FOUND', '节点已不存在，请刷新。')
+  if (node === undefined) throw new MapError('NOT_FOUND', 'The target no longer exists; refresh and try again.')
   return node
 }
 
@@ -309,11 +324,11 @@ export function workspaceSelection(key: string | null): { workspaceId: string | 
 /** Validate and normalize one space title, rejecting duplicates. */
 function cleanSpaceTitle(state: MapState, title: string, selfId: string | null): string {
   const trimmed = title.trim()
-  if (trimmed.length === 0) throw new MapError('SPACE_TITLE_EMPTY', '空间名称不能为空。')
-  if (trimmed.length > MAX_SPACE_TITLE) throw new MapError('SPACE_TITLE_LONG', `空间名称最多 ${MAX_SPACE_TITLE} 个字符。`)
+  if (trimmed.length === 0) throw new MapError('SPACE_TITLE_EMPTY', 'A space name is required.')
+  if (trimmed.length > MAX_SPACE_TITLE) throw new MapError('SPACE_TITLE_LONG', `A space name is limited to ${String(MAX_SPACE_TITLE)} characters.`, { max: MAX_SPACE_TITLE })
   const wanted = trimmed.toLocaleLowerCase()
   if (state.spaces.some(space => space.id !== selfId && space.title.toLocaleLowerCase() === wanted)) {
-    throw new MapError('SPACE_TITLE_DUP', '已有同名空间，请换一个名称。')
+    throw new MapError('SPACE_TITLE_DUP', 'A space with that name already exists; choose another name.')
   }
   return trimmed
 }
@@ -321,7 +336,7 @@ function cleanSpaceTitle(state: MapState, title: string, selfId: string | null):
 /** Read one space, throwing when the caller names a space that is gone. */
 function requireSpace(state: MapState, id: string): SpaceRef {
   const space = state.spaces.find(candidate => candidate.id === id)
-  if (space === undefined) throw new MapError('SPACE_NOT_FOUND', '空间已不存在，请刷新。')
+  if (space === undefined) throw new MapError('SPACE_NOT_FOUND', 'That space no longer exists; refresh and try again.')
   return space
 }
 
@@ -411,7 +426,7 @@ export function looseRowKey(state: MapState, spaceId: string): string {
  */
 export function createSpace(state: MapState, input: { title: string; id?: string }): { state: MapState; id: string } {
   const title = cleanSpaceTitle(state, input.title, null)
-  if (state.spaces.length >= MAX_SPACES) throw new MapError('SPACE_LIMIT', `最多支持 ${MAX_SPACES} 个空间。`)
+  if (state.spaces.length >= MAX_SPACES) throw new MapError('SPACE_LIMIT', `At most ${String(MAX_SPACES)} spaces are supported.`, { max: MAX_SPACES })
   const id = input.id ?? crypto.randomUUID()
   const position = state.spaces.reduce((max, space) => Math.max(max, space.position), 0) + 1
   const next = mutate(state, draft => {
@@ -439,7 +454,7 @@ export function renameSpace(state: MapState, input: { id: string; title: string 
  */
 export function deleteSpace(state: MapState, id: string): MapState {
   requireSpace(state, id)
-  if (id === state.defaultSpaceId) throw new MapError('DEFAULT_SPACE', '默认空间不能删除，可以重命名。')
+  if (id === state.defaultSpaceId) throw new MapError('DEFAULT_SPACE', 'The default space cannot be deleted; rename it instead.')
   return mutate(state, draft => {
     draft.spaces = draft.spaces.filter(space => space.id !== id)
     for (const [workspaceId, spaceId] of Object.entries(draft.spaceOf)) {
@@ -470,8 +485,8 @@ export function setWorkspaceSpace(state: MapState, workspaceId: string, spaceId:
 export function setThreadSpace(state: MapState, sessionId: string, spaceId: string): MapState {
   requireSpace(state, spaceId)
   const thread = state.threads.find(candidate => candidate.sessionId === sessionId)
-  if (thread === undefined) throw new MapError('NOT_FOUND', '对话已不存在，请刷新。')
-  if (ownerOf(thread.workspaceId) !== null) throw new MapError('WORKSPACE', '只有不属于任何工作区的对话才能归入空间。')
+  if (thread === undefined) throw new MapError('NOT_FOUND', 'That conversation no longer exists; refresh and try again.')
+  if (ownerOf(thread.workspaceId) !== null) throw new MapError('WORKSPACE', 'Only conversations outside every Workspace can be filed into a space.')
   if (spaceOfThread(state, thread) === spaceId) return state
   return mutate(state, draft => {
     const target = draft.threads.find(candidate => candidate.sessionId === sessionId)
@@ -632,12 +647,28 @@ export function pathBaseName(path: string): string {
   return trimmed.slice(at + 1)
 }
 
-/** The label one Workspace row shows. */
-export function workspaceDisplayTitle(workspace: Pick<WorkspaceRef, 'title' | 'path'>): string {
+/** Localized labels the Workspace title fallback needs. */
+export interface WorkspaceTitleLabels {
+  /** Shown for the Host's `default-workspace` placeholder title. */
+  defaultWorkspace: string
+  /** Shown when neither a title nor a directory name is available. */
+  workspaceFallback: string
+}
+
+/**
+ * The label one Workspace row shows.
+ * @param workspace - the Host's Workspace row (title and path).
+ * @param labels - localized fallback labels; user data renders verbatim.
+ * @returns the stored title, the directory name, or a localized fallback.
+ */
+export function workspaceDisplayTitle(
+  workspace: Pick<WorkspaceRef, 'title' | 'path'>,
+  labels: WorkspaceTitleLabels,
+): string {
   const title = workspace.title.trim()
-  if (title === 'default-workspace') return '默认工作区'
+  if (title === 'default-workspace') return labels.defaultWorkspace
   if (title !== '') return title
-  return pathBaseName(workspace.path) || workspace.path || '工作区'
+  return pathBaseName(workspace.path) || workspace.path || labels.workspaceFallback
 }
 
 /**
@@ -739,14 +770,14 @@ export function homeOfSession(
 /** Validate a user-supplied node title. */
 function cleanTitle(title: string): string {
   const trimmed = title.trim()
-  if (trimmed.length === 0) throw new MapError('TITLE_EMPTY', '节点名称不能为空。')
-  if (trimmed.length > MAX_TITLE) throw new MapError('TITLE_LONG', `节点名称最多 ${MAX_TITLE} 个字符。`)
+  if (trimmed.length === 0) throw new MapError('TITLE_EMPTY', 'A topic name is required.')
+  if (trimmed.length > MAX_TITLE) throw new MapError('TITLE_LONG', `A topic name is limited to ${String(MAX_TITLE)} characters.`, { max: MAX_TITLE })
   return trimmed
 }
 
 /** Validate a user-supplied description. */
 function cleanDescription(description: string): string {
-  if (description.length > MAX_DESCRIPTION) throw new MapError('DESCRIPTION_LONG', `说明最多 ${MAX_DESCRIPTION} 个字符。`)
+  if (description.length > MAX_DESCRIPTION) throw new MapError('DESCRIPTION_LONG', `A description is limited to ${String(MAX_DESCRIPTION)} characters.`, { max: MAX_DESCRIPTION })
   return description
 }
 
@@ -770,14 +801,14 @@ export function createNode(
     const parent = requireNode(state, input.parentId)
     workspaceId = workspaceOfNode(parent)
     if (input.workspaceId !== undefined && ownerOf(input.workspaceId) !== workspaceId) {
-      throw new MapError('WORKSPACE', '子节点必须和父节点在同一个工作区。')
+      throw new MapError('WORKSPACE', 'A child topic must live in the same Workspace as its parent.')
     }
   } else {
     workspaceId = ownerOf(input.workspaceId)
   }
-  if (state.nodes.length >= MAX_NODES) throw new MapError('LIMIT', `最多支持 ${MAX_NODES} 个节点。`)
+  if (state.nodes.length >= MAX_NODES) throw new MapError('LIMIT', `At most ${String(MAX_NODES)} nodes are supported.`, { max: MAX_NODES })
   const parentDepth = input.parentId === null ? 0 : depthOf(state, input.parentId)
-  if (parentDepth + 1 > MAX_DEPTH) throw new MapError('DEPTH', `最多支持 ${MAX_DEPTH} 层。`)
+  if (parentDepth + 1 > MAX_DEPTH) throw new MapError('DEPTH', `At most ${String(MAX_DEPTH)} levels are supported.`, { max: MAX_DEPTH })
   const id = input.id ?? crypto.randomUUID()
   const siblings = state.nodes.filter(node =>
     node.parentId === input.parentId && ownerOf(node.workspaceId) === workspaceId)
@@ -815,6 +846,8 @@ export function updateNode(state: MapState, input: { id: string; title: string; 
 export interface MoveIssue {
   readonly code: string
   readonly message: string
+  /** Values the client dictionary interpolates (limits, names). */
+  readonly params?: Readonly<Record<string, string | number>>
 }
 
 /**
@@ -833,27 +866,27 @@ export interface MoveIssue {
  */
 export function moveNodeIssue(state: MapState, id: string, parentId: string | null): MoveIssue | null {
   const node = state.nodes.find(candidate => candidate.id === id)
-  if (node === undefined) return { code: 'NOT_FOUND', message: '节点已不存在，请刷新。' }
+  if (node === undefined) return { code: 'NOT_FOUND', message: 'The target node no longer exists; refresh and try again.' }
   const workspaceId = workspaceOfNode(node)
   if (parentId !== null) {
     const parent = state.nodes.find(candidate => candidate.id === parentId)
-    if (parent === undefined) return { code: 'NOT_FOUND', message: '节点已不存在，请刷新。' }
+    if (parent === undefined) return { code: 'NOT_FOUND', message: 'The target node no longer exists; refresh and try again.' }
     if (workspaceOfNode(parent) !== workspaceId) {
-      return { code: 'WORKSPACE', message: '不能把节点移动到其他工作区的节点下。' }
+      return { code: 'WORKSPACE', message: 'A node cannot move under a node of a different Workspace.' }
     }
     if (descendantIds(state, id).has(parentId)) {
-      return { code: 'CYCLE', message: '不能把节点移动到它自己或它的子节点下。' }
+      return { code: 'CYCLE', message: 'A node cannot move under itself or its descendants.' }
     }
   }
   const targetDepth = parentId === null ? 0 : depthOf(state, parentId)
-  if (targetDepth + heightOf(state, id) > MAX_DEPTH) return { code: 'DEPTH', message: `最多支持 ${MAX_DEPTH} 层。` }
+  if (targetDepth + heightOf(state, id) > MAX_DEPTH) return { code: 'DEPTH', message: `At most ${String(MAX_DEPTH)} levels are supported.`, params: { max: MAX_DEPTH } }
   return null
 }
 
 /** Re-parent one node inside its own Workspace, rejecting cycles and over-deep moves. */
 export function moveNode(state: MapState, id: string, parentId: string | null): MapState {
   const issue = moveNodeIssue(state, id, parentId)
-  if (issue !== null) throw new MapError(issue.code, issue.message)
+  if (issue !== null) throw new MapError(issue.code, issue.message, issue.params)
   const workspaceId = workspaceOfNode(requireNode(state, id))
   const siblings = state.nodes.filter(candidate =>
     candidate.parentId === parentId && candidate.id !== id && ownerOf(candidate.workspaceId) === workspaceId)
@@ -896,7 +929,7 @@ export function insertNodeBefore(
   beforeNodeId?: string,
 ): MapState {
   const issue = moveNodeIssue(state, id, parentId)
-  if (issue !== null) throw new MapError(issue.code, issue.message)
+  if (issue !== null) throw new MapError(issue.code, issue.message, issue.params)
   const moved = requireNode(state, id)
   const workspaceId = workspaceOfNode(moved)
   const siblings = sorted(state.nodes.filter(candidate =>
@@ -905,7 +938,7 @@ export function insertNodeBefore(
     ? undefined
     : siblings.find(candidate => candidate.id === beforeNodeId)
   if (beforeNodeId !== undefined && anchor === undefined) {
-    throw new MapError('ANCHOR', '锚点节点不在目标位置下。')
+    throw new MapError('ANCHOR', 'The anchor node is not under the target parent.')
   }
   // `insertBefore(x, x)` keeps x exactly where it is: nothing to recompute.
   if (anchor !== undefined && anchor.id === id) return state
@@ -938,7 +971,7 @@ export function insertNodeBefore(
 /** Delete a leaf node; its conversations stay in the Workspace, unassigned. */
 export function deleteNode(state: MapState, id: string): MapState {
   requireNode(state, id)
-  if (state.nodes.some(node => node.parentId === id)) throw new MapError('HAS_CHILDREN', '请先移动或删除子节点。')
+  if (state.nodes.some(node => node.parentId === id)) throw new MapError('HAS_CHILDREN', 'Move or delete the child topics first.')
   return mutate(state, draft => {
     draft.nodes = draft.nodes.filter(node => node.id !== id)
     for (const thread of draft.threads) if (thread.nodeId === id) thread.nodeId = null
@@ -961,22 +994,22 @@ export function deleteNode(state: MapState, id: string): MapState {
  */
 export function assignThreadIssue(state: MapState, sessionId: string, nodeId: string | null): MoveIssue | null {
   const node = nodeId === null ? undefined : state.nodes.find(candidate => candidate.id === nodeId)
-  if (nodeId !== null && node === undefined) return { code: 'NOT_FOUND', message: '节点已不存在，请刷新。' }
+  if (nodeId !== null && node === undefined) return { code: 'NOT_FOUND', message: 'The target node no longer exists; refresh and try again.' }
   const thread = state.threads.find(candidate => candidate.sessionId === sessionId)
   // A subagent child never becomes a row of its own, so it can never be a row
   // under a node either: it is reached from its parent conversation instead.
   if (thread?.origin === 'subagent' || isRecordedSubagent(state, sessionId)) {
-    return { code: 'SUBAGENT', message: '子智能体会话不能挂到节点下。' }
+    return { code: 'SUBAGENT', message: 'A subagent conversation cannot be filed under a topic.' }
   }
   if (thread === undefined || thread.workspaceId === undefined || node === undefined) return null
   const nodeWorkspace = workspaceOfNode(node)
   if (ownerOf(thread.workspaceId) !== nodeWorkspace) {
-    return { code: 'WORKSPACE', message: '只能把对话关联到它所属工作区里的节点。' }
+    return { code: 'WORKSPACE', message: 'A conversation can only be filed under a node of its own Workspace.' }
   }
   // A legacy rootless topic lives in the default space only, so a loose
   // conversation filed there must not belong to another space.
   if (nodeWorkspace === null && spaceOfThread(state, thread) !== state.defaultSpaceId) {
-    return { code: 'SPACE', message: '只能把默认空间的未分组对话关联到未分组主题。' }
+    return { code: 'SPACE', message: 'Only ungrouped conversations in the default space can be filed under the ungrouped topic.' }
   }
   return null
 }
@@ -995,7 +1028,7 @@ export function assignThreads(state: MapState, sessionIds: readonly string[], no
   const nodeWorkspace = node === undefined ? undefined : workspaceOfNode(node)
   for (const sessionId of sessionIds) {
     const issue = assignThreadIssue(state, sessionId, nodeId)
-    if (issue !== null) throw new MapError(issue.code, issue.message)
+    if (issue !== null) throw new MapError(issue.code, issue.message, issue.params)
   }
   const wanted = new Set(sessionIds)
   return mutate(state, draft => {
@@ -1463,11 +1496,18 @@ export function parseMapState(text: string | null): MapState {
     }
     const current = candidate.version === 2 || candidate.version === 1
     if (!current) return emptyMap()
-    const spaces = readSpaces(candidate.spaces)
-    const known = new Set(spaces.map(space => space.id))
+    const parsedSpaces = readSpaces(candidate.spaces)
+    const known = new Set(parsedSpaces.map(space => space.id))
     const defaultSpaceId = typeof candidate.defaultSpaceId === 'string' && known.has(candidate.defaultSpaceId)
       ? candidate.defaultSpaceId
       : ''
+    // Older documents stored the default space's label as Chinese text; rewrite
+    // only the default space's marker so it reads in any language without
+    // touching a title the user actually typed on another space.
+    const spaces = parsedSpaces.map(space =>
+      space.id === defaultSpaceId && space.title === LEGACY_DEFAULT_SPACE_TITLE
+        ? { ...space, title: DEFAULT_SPACE_TITLE }
+        : space)
     const rows = readRows(candidate, candidate.version === 2, spaces)
     if (rows === undefined) return emptyMap()
     return {
@@ -1576,8 +1616,8 @@ export function breadcrumb(state: MapState, nodeId: string): string {
   return nodePath(state, nodeId).map(node => node.title).join(' / ')
 }
 
-/** Label of the "directly under the Workspace" destination. */
-const WORKSPACE_ROOT_TARGET_LABEL = '（工作区顶层）'
+/** Label of the "directly under the Workspace" destination (localized fallback). */
+const WORKSPACE_ROOT_TARGET_LABEL = '(Workspace top level)'
 
 /**
  * Every node one conversation of a Workspace may move to, in the order the map
@@ -1590,15 +1630,17 @@ const WORKSPACE_ROOT_TARGET_LABEL = '（工作区顶层）'
  * once — and no document is touched, so a dialog can build the list per open.
  * @param state - the map.
  * @param workspaceId - the Workspace whose nodes are the targets; `null` = the ungrouped bucket.
+ * @param workspaceRootLabel - localized label of the Workspace-row destination.
  * @returns the selectable destinations, the Workspace root (`null`) first.
  */
 export function threadMoveTargets(
   state: MapState,
   workspaceId: string | null,
+  workspaceRootLabel: string = WORKSPACE_ROOT_TARGET_LABEL,
 ): Array<{ nodeId: string | null; label: string }> {
   const wanted = ownerOf(workspaceId)
   const targets: Array<{ nodeId: string | null; label: string }> = [
-    { nodeId: null, label: WORKSPACE_ROOT_TARGET_LABEL },
+    { nodeId: null, label: workspaceRootLabel },
   ]
   const children = new Map<string, MapNode[]>()
   for (const node of state.nodes) {

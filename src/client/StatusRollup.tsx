@@ -23,13 +23,19 @@ import {
   type StatusCategory,
   type StatusRollup,
 } from '../shared/status-rollup.js'
+import { useT } from './locale.js'
 
-/** Wording used for the badge's accessible name. */
-const CATEGORY_LABEL: Record<StatusCategory, string> = {
-  pending: '待响应',
-  error: '异常',
-  done: '已完成',
-  running: '运行中',
+/**
+ * Dictionary keys naming each category in the badge's accessible label.
+ *
+ * The mapping is keys rather than wording, so the label the reader hears
+ * follows the language DSH is in; the badge resolves them through {@link useT}.
+ */
+const CATEGORY_KEY: Record<StatusCategory, string> = {
+  pending: 'status.pending',
+  error: 'status.error',
+  done: 'status.done',
+  running: 'status.running',
 }
 
 /** Props of one rollup badge. */
@@ -43,8 +49,9 @@ export interface StatusRollupProps {
    *
    * Node rows aggregate their subtree; the sidebar row aggregates every
    * conversation the map indexes, so it passes its own scope instead of the
-   * default. Kept out of the visible mark on purpose: the row already names
-   * itself, and the count is the thing to read.
+   * default (the dictionary's `status.defaultScope`). Kept out of the visible
+   * mark on purpose: the row already names itself, and the count is the thing to
+   * read.
    */
   scope?: string | undefined
 }
@@ -63,11 +70,18 @@ function visibleCategories(rollup: StatusRollup): StatusCategory[] {
  * @param props - the counts, density, and the aggregation scope named to readers.
  * @returns the badge, or null when the row has no status to report.
  */
-export function StatusRollupBadge({ rollup, density, scope = '含全部下游节点' }: StatusRollupProps): ReactNode {
+export function StatusRollupBadge({ rollup, density, scope }: StatusRollupProps): ReactNode {
+  const t = useT()
   if (rollup === undefined || rollup.total === 0) return null
   const categories = visibleCategories(rollup)
-  const parts = categories.map(category => `${String(rollup.counts[category])} 条${CATEGORY_LABEL[category]}`)
-  const label = `会话状态：${parts.join('，')}（${scope}）`
+  const parts = categories.map(category => t('status.count', {
+    n: rollup.counts[category],
+    label: t(CATEGORY_KEY[category]),
+  }))
+  const label = t('status.label', {
+    parts: parts.join(t('status.separator')),
+    scope: scope ?? t('status.defaultScope'),
+  })
   const fresh = rollup.fresh
   const common = {
     className: `cm-rollup${density === 'dots' ? ' cm-rollup-dots' : ''}`,

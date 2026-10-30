@@ -424,6 +424,43 @@ export function rollupStatusesBySpace(input: SpaceRollupInput): ReadonlyMap<stri
 }
 
 /**
+ * Fold several space rollups into the whole map's total.
+ *
+ * The space breadcrumb's root segment answers "how much is going on anywhere?"
+ * while the tree in front shows one space. Summing the per-space rollups is what
+ * makes "合计 = Σ 各空间" true by construction: the two readouts come from the
+ * same pass, so they can never disagree about a conversation, a category, or the
+ * open-conversation rule. Re-counting threads here would be a second statistic
+ * with its own chance to drift.
+ *
+ * `fresh` keeps the newest category so the two-minute halo still fires on the
+ * aggregate; only its display value matters. `direct` mirrors `counts`, the same
+ * convention {@link rollupStatusesBySpace} uses for its flat buckets — the space
+ * path has no subtree, so "direct" and "total" are the same set.
+ * @param rollups - the per-space rollups to add up.
+ * @returns one rollup; zeroed when the input is empty.
+ */
+export function mergeStatusRollups(rollups: Iterable<StatusRollup>): StatusRollup {
+  const counts = emptyStatusCounts()
+  let fresh: { category: StatusCategory; at: number } | undefined
+  for (const rollup of rollups) {
+    addStatusCounts(counts, rollup.counts)
+    if (rollup.fresh !== undefined && rollup.freshAt !== undefined) {
+      if (fresh === undefined || rollup.freshAt > fresh.at) fresh = { category: rollup.fresh, at: rollup.freshAt }
+    }
+  }
+  const total = counts.pending + counts.error + counts.done + counts.running
+  const attention = counts.pending + counts.error + counts.done
+  return {
+    counts,
+    direct: { ...counts },
+    total,
+    attention,
+    ...(fresh === undefined ? {} : { fresh: fresh.category, freshAt: fresh.at }),
+  }
+}
+
+/**
  * Total "needs a look" count across every Workspace and the ungrouped bucket.
  * @param result - a rollup result.
  * @returns the number shown on the collapsed-band sidebar badge.

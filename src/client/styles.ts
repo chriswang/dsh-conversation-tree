@@ -121,13 +121,19 @@ html[data-conversation-map-split] [data-shell-leading] button:not(:first-of-type
    stops keyboard focus). The descendant * is load-bearing: sibling plugins
    re-state visibility:visible on their own rows (ui-workspace does), which would
    otherwise re-arm the trap for everything below them.
-   Scoping is what makes this safe: darwin only (Web/Windows keep a 56px icon
-   rail whose controls are visible and must stay interactive), map mode only, and
-   only while the frame says [data-sidebar-collapsed]. Expanding the sidebar —
-   the reader may do that in map mode at any time — removes that attribute and
-   every rule here stops applying, so the real column comes back exactly as the
-   shell draws it. Out of map mode nothing changes at all: a manual collapse
-   there is the shell's own behaviour and not the plugin's to override. */
+   Scoping is what makes this safe: darwin only, map mode only, and only while
+   the frame says [data-sidebar-collapsed]. The zero-width collapse is not
+   macOS-only — the Windows desktop shell collapses the column to 0 too — but
+   the Windows caption row keeps the reopen controls *visible* as fixed
+   buttons inside this same sidebar slot (ui-sidebar's collapsed styles), so
+   hiding the subtree there would remove the only visible way back. Web keeps
+   its 56px icon rail, whose controls are visible and must stay interactive.
+   That is why the rule is keyed to the platform that clips its reopen control,
+   not to the collapse state. Expanding the sidebar — the reader may do that in
+   map mode at any time — removes that attribute and every rule here stops
+   applying, so the real column comes back exactly as the shell draws it. Out
+   of map mode nothing changes at all: a manual collapse there is the shell's
+   own behaviour and not the plugin's to override. */
 html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapsed] [data-slot="sidebar"] *{visibility:hidden}
 /* A bubble that is already up carries visibility:visible as an inline style,
    which no inherited value can clamp, so a focus that lands in the same frame
@@ -182,7 +188,7 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
    seam, 0px above that head). */
 .cm-band-row2{display:flex;align-items:flex-start;gap:8px;flex:0 0 auto;height:28px;margin-top:8px;padding-left:calc(var(--cm-band-rail,14px) - 8px);padding-right:16px;min-width:0;overflow:clip;overflow-clip-margin:0;pointer-events:none}
 .cm-band-row2>*{pointer-events:auto}
-.cm-band-row2>.cm-space-btn{flex:0 1 auto;max-width:100%}
+.cm-band-row2>.cm-crumb{flex:0 1 auto;max-width:100%}
 /* Search shares this row, so it takes the same 24px — and border-box, because
    its 1px brand underline would otherwise hang 1px below the switcher and eat
    one of the four pixels of air (measured: 3px instead of 4). */
@@ -240,13 +246,14 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
 /* The overlay layer is click-through; the band's menus and dialogs are not. */
 .cm-band .cm-backdrop,.cm-band .cm-menu,.cm-band .cm-dialog{pointer-events:auto}
 /* The band gets narrow when a right Sidebar is open or the window is small.
-   The space switcher never hides: it sits in the second row, whose whole width
-   is available to it, so it survives the 200–480px range the switch used to
-   vanish in (the band itself is visible down to MIN_VISIBLE_BAND_WIDTH = 200).
-   Past its floor the label ellipsizes to nothing and the two glyphs stay, so
-   the reader can always see and change the space. Only the search field folds,
-   and only the field — never its row — so the band's header keeps its 76px and
-   the two headers still meet on one seam. */
+   The space entry never hides: the breadcrumb sits in the second row, whose
+   whole width is available to it, so it survives down to the band's own floor
+   (MIN_MAP_WIDTH = 320px; below MIN_CENTRE_FOR_BAND the band collapses itself).
+   Past its floor the current segment's label ellipsizes and its status cluster
+   gives way first (see spaceBreadcrumbDensities), so the reader can always see
+   and change the space. Only the search field folds, and only the field — never
+   its row — so the band's header keeps its 76px and the two headers still meet
+   on one seam. */
 @container (max-width: 360px){.cm-band .cm-band-row2 .cm-band-search{display:none}.cm-band .cm-band-refresh{display:none}}
 
 /* The product DOM did not provide a measurable Conversation column: the band
@@ -511,7 +518,11 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
    numbers. */
 .cm-band[data-compact] .cm-space-btn .cm-rollup{display:none}
 @supports selector(:has(*)){
-  .cm-band-row2:has(.cm-search) .cm-space-btn .cm-rollup{display:none}
+  /* The search field takes the row; both breadcrumb segments drop their clusters
+     together (the root is inside .cm-crumb too, so one descendant selector covers
+     the whole entry). A half state — root cluster kept, current cluster gone —
+     would read as a different total and is never intentional. */
+  .cm-band-row2:has(.cm-search) .cm-crumb .cm-rollup{display:none}
 }
 /* The fill that comes back is the product's own hover state, not the resting
    surface token: --dsw-alias-bg-layer-2 resolves to an *opaque* surface (white
@@ -525,6 +536,21 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
 .cm-space-btn .cm-glyph,.cm-space-btn .cm-chevron-glyph{flex:none;color:var(--dsw-alias-label-tertiary,currentColor)}
 .cm-chevron-glyph{width:14px;height:14px}
 .cm-space-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The space breadcrumb is one control: the whole bar is a single .cm-space-btn,
+   so every pixel — including the whole-map count after 「全部空间」 — opens the
+   space menu. No segment is a dead zone and there is never a question of which
+   part is the dropdown; the chevron appears once, at the row's end. The menu
+   anchors to the bar's left edge, so its position is stable however far right the
+   reader clicks. Only the current space's name shrinks; the root label, the
+   separator, both clusters and the chevron stay whole. */
+.cm-crumb{display:flex;align-items:center;gap:6px;flex:0 1 auto;min-width:0;max-width:100%}
+.cm-crumb-root{display:inline-flex;align-items:center;gap:6px;flex:none;color:var(--dsw-alias-label-secondary,currentColor);font-weight:500;white-space:nowrap}
+.cm-crumb-root .cm-glyph{flex:none;color:var(--dsw-alias-label-tertiary,currentColor)}
+.cm-crumb-root-label{white-space:nowrap}
+.cm-crumb-sep{flex:none;font-size:11px;line-height:1;color:var(--dsw-alias-label-tertiary,currentColor)}
+.cm-crumb-current{display:inline-flex;align-items:center;gap:6px;flex:0 1 auto;min-width:0;font-weight:600;color:var(--dsw-alias-label-primary,currentColor)}
+.cm-crumb-current .cm-space-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cm-crumb-current .cm-rollup{flex:none}
 .cm-space-menu{min-width:230px;max-width:320px}
 .cm-space-row{display:flex;align-items:center;gap:8px;padding:6px 9px;border-radius:6px;cursor:pointer;user-select:none;font-size:12px;line-height:16px}
 .cm-space-row:hover,.cm-space-row:focus-visible{background:color-mix(in srgb,currentColor 8%,transparent);outline:none}

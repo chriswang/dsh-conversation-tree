@@ -10,7 +10,8 @@ import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
 
 import {
-  FRESH_MS, attentionTotal, emptyStatusCounts, emptyStatusRollup, rollupStatuses, rollupStatusesBySpace,
+  FRESH_MS, attentionTotal, emptyStatusCounts, emptyStatusRollup, mergeStatusRollups, rollupStatuses,
+  rollupStatusesBySpace,
 } from '../lib/status-rollup.js'
 
 /** A fixed clock keeps the halo assertions deterministic. */
@@ -245,6 +246,81 @@ test('a conversation repeated across space rows is counted once', () => {
   assert.equal(result.get('sp2').counts.pending, 0, 'a duplicated row must not double count')
 })
 
+
+test('mergeStatusRollups adds every space and keeps the whole-map identity', () => {
+  const spaces = rollupStatusesBySpace({
+    spaces: ['sp1', 'sp2'],
+    threads: [
+      { sessionId: 's1', nodeId: null, spaceId: 'sp1' },
+      { sessionId: 's2', nodeId: null, spaceId: 'sp2' },
+      { sessionId: 's3', nodeId: null, spaceId: 'sp2' },
+    ],
+    statuses: new Map([
+      ['s1', observed('pending')],
+      ['s2', observed('done')],
+      ['s3', observed('running')],
+    ]),
+    now: NOW,
+  })
+  const merged = mergeStatusRollups(spaces.values())
+  assert.deepEqual(merged.counts, { pending: 1, error: 0, done: 1, running: 1 })
+  assert.equal(merged.total, 3, 'total adds every category')
+  assert.equal(merged.attention, 2, 'attention excludes running')
+  assert.deepEqual(merged.direct, merged.counts, 'flat buckets have no subtree, so direct mirrors total')
+})
+
+test('mergeStatusRollups keeps the newest fresh category', () => {
+  const spaces = rollupStatusesBySpace({
+    spaces: ['sp1', 'sp2'],
+    threads: [
+      { sessionId: 's1', nodeId: null, spaceId: 'sp1' },
+      { sessionId: 's2', nodeId: null, spaceId: 'sp2' },
+    ],
+    statuses: new Map([
+      ['s1', observed('pending', NOW - FRESH_MS - 1000)],
+      ['s2', observed('done', NOW - 1000)],
+    ]),
+    now: NOW,
+  })
+  const merged = mergeStatusRollups(spaces.values())
+  assert.equal(merged.fresh, 'done', 'the halo follows the newest change')
+  assert.equal(merged.freshAt, NOW - 1000)
+})
+
+test('mergeStatusRollups of nothing is a zero rollup', () => {
+  assert.deepEqual(mergeStatusRollups([]), emptyStatusRollup())
+})
+
+test('merged spaces equal the Workspace + ungrouped pass for the same statuses', () => {
+  const nodes = [node('n1')]
+  const threads = [
+    { sessionId: 's1', nodeId: 'n1', workspaceId: 'w1' },
+    { sessionId: 's2', nodeId: null, workspaceId: null },
+    { sessionId: 's3', nodeId: null, workspaceId: 'w2' },
+  ]
+  const statuses = new Map([
+    ['s1', observed('pending')],
+    ['s2', observed('done')],
+    ['s3', observed('running')],
+  ])
+  const byRow = rollupStatuses({ nodes, threads, statuses, now: NOW })
+  const bySpace = rollupStatusesBySpace({
+    spaces: ['sp1', 'sp2'],
+    threads: [
+      { sessionId: 's1', nodeId: 'n1', spaceId: 'sp1' },
+      { sessionId: 's2', nodeId: null, spaceId: 'sp1' },
+      { sessionId: 's3', nodeId: null, spaceId: 'sp2' },
+    ],
+    statuses,
+    now: NOW,
+  })
+  const sum = { pending: 0, error: 0, done: 0, running: 0 }
+  for (const [key, rollup] of [...byRow.workspaces, ['ungrouped', byRow.ungrouped]]) {
+    void key
+    for (const cat of Object.keys(sum)) sum[cat] += rollup.counts[cat]
+  }
+  assert.deepEqual(mergeStatusRollups(bySpace.values()).counts, sum, 'the two counting paths agree')
+})
 
 test('1500 nodes and 3000 conversations stay a linear single pass', () => {
   const nodes = Array.from({ length: 1500 }, (_, index) => node(`n${String(index)}`, index === 0 ? null : `n${String(index - 1)}`))

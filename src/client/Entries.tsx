@@ -42,6 +42,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 
 import { FRESH_MS, type ObservedSessionStatus, type StatusCategory, type StatusCounts, type StatusRollup } from '../shared/status-rollup.js'
 import type { BandCollapseStore, FirstRunHintStore } from '../shared/mode-memory.js'
+import { LocaleProvider, useLocaleT, type LocaleService } from './locale.js'
 import type { MapStore } from './map-store.js'
 import type { CatalogState, ObservableSnapshot, RootPanelProps, SessionStatusLike } from './services.js'
 import type { StatusLedger } from './status-ledger.js'
@@ -190,6 +191,8 @@ function useActivePanelId(
 export interface MapLauncherProps extends EntryInjected {
   /** Standard header-leading owner share is empty; kept optional for tests. */
   readonly children?: never
+  /** The DSH locale service, when this profile provides one. */
+  readonly locale?: LocaleService | undefined
 }
 
 /**
@@ -203,7 +206,8 @@ export interface MapLauncherProps extends EntryInjected {
  * @returns the icon-only 「展开对话树」 button (plus its one-time hint), or nothing
  *   while the band is on screen or another band owns the slot.
  */
-export function MapLauncher({ collapsed, hint, bandSlot }: MapLauncherProps): ReactNode {
+export function MapLauncher({ collapsed, hint, bandSlot, locale }: MapLauncherProps): ReactNode {
+  const t = useLocaleT(locale)
   const hidden = useCollapsed(collapsed)
   const owner = useBandOwner(bandSlot)
   const pending = useHintPending(hint)
@@ -229,17 +233,19 @@ export function MapLauncher({ collapsed, hint, bandSlot }: MapLauncherProps): Re
     hint?.dismiss()
   }
   return (
-    <span className="cm-view-toggle-seat">
-      <ViewToggle
-        target="expand"
-        compact
-        onSelect={() => {
-          retire()
-          collapsed?.set(false)
-        }}
-      />
-      {pending && visible && <span className="cm-hint" aria-hidden="true">展开对话树</span>}
-    </span>
+    <LocaleProvider translator={t}>
+      <span className="cm-view-toggle-seat">
+        <ViewToggle
+          target="expand"
+          compact
+          onSelect={() => {
+            retire()
+            collapsed?.set(false)
+          }}
+        />
+        {pending && visible && <span className="cm-hint" aria-hidden="true">{t('view.expand')}</span>}
+      </span>
+    </LocaleProvider>
   )
 }
 
@@ -259,6 +265,8 @@ export interface MapPanelIconProps extends EntryInjected {
   readonly store?: MapStore | undefined
   /** The shared status observation. */
   readonly statusLedger?: StatusLedger | undefined
+  /** The DSH locale service, when this profile provides one. */
+  readonly locale?: LocaleService | undefined
   /**
    * The row's one action: make sure the band is on screen.
    *
@@ -300,8 +308,9 @@ export interface MapPanelIconProps extends EntryInjected {
  * @returns the glyph plus its state marker.
  */
 export function MapPanelIcon({
-  collapsed, panelInfo, size, useSessionStatus, useSessions, store, statusLedger, activate,
+  collapsed, panelInfo, size, useSessionStatus, useSessions, store, statusLedger, activate, locale,
 }: MapPanelIconProps): ReactNode {
+  const t = useLocaleT(locale)
   const hidden = useCollapsed(collapsed)
   const activePanelId = useActivePanelId(panelInfo)
   const glyph = useRef<HTMLSpanElement | null>(null)
@@ -483,25 +492,35 @@ export function MapPanelIcon({
   const statusTitle = rollup === undefined
     ? undefined
     : rollup.attention > 0
-      ? `${String(rollup.attention)} 条待处理`
-      : `${String(rollup.counts.running)} 个会话运行中`
+      ? t('entries.pendingCount', { n: rollup.attention })
+      : t('entries.runningCount', { n: rollup.counts.running })
   const title = onScreen
-    ? statusTitle === undefined ? '对话树（已开启）' : `对话树（已开启）：${statusTitle}`
-    : statusTitle === undefined ? '对话树' : `对话树：${statusTitle}`
+    ? statusTitle === undefined
+      ? t('entries.titleOnScreen')
+      : t('entries.titleOnScreenWithStatus', { status: statusTitle })
+    : statusTitle === undefined
+      ? t('common.panelTitle')
+      : t('entries.titleWithStatus', { status: statusTitle })
   return (
-    <span
-      ref={glyph}
-      className="cm-panel-glyph"
-      data-seat={rail ? 'rail' : 'wide'}
-      data-in-use={onScreen ? 'true' : 'false'}
-      title={title}
-      {...(rollup === undefined ? {} : { 'aria-label': title })}
-    >
-      <MapGlyph size={size} filled={onScreen} />
-      {rollup !== undefined && (
-        <StatusRollupBadge rollup={rollup} density={rail ? 'dots' : 'cluster'} scope="全部已索引会话" />
-      )}
-    </span>
+    <LocaleProvider translator={t}>
+      <span
+        ref={glyph}
+        className="cm-panel-glyph"
+        data-seat={rail ? 'rail' : 'wide'}
+        data-in-use={onScreen ? 'true' : 'false'}
+        title={title}
+        {...(rollup === undefined ? {} : { 'aria-label': title })}
+      >
+        <MapGlyph size={size} filled={onScreen} />
+        {rollup !== undefined && (
+          <StatusRollupBadge
+            rollup={rollup}
+            density={rail ? 'dots' : 'cluster'}
+            scope={t('entries.scopeAllIndexed')}
+          />
+        )}
+      </span>
+    </LocaleProvider>
   )
 }
 

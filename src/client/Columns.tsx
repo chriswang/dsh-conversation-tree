@@ -16,6 +16,7 @@ import { useRef, type CSSProperties, type PointerEvent, type ReactNode } from 'r
 
 import { clampColumnWidth } from '../shared/view-state.js'
 import type { StatusRollup } from '../shared/status-rollup.js'
+import { useT } from './locale.js'
 import type { DragPayload } from './row-drag.js'
 import { StatusRollupBadge } from './StatusRollup.js'
 
@@ -360,6 +361,7 @@ export function showsStatusRollup(rollup: StatusRollup | undefined): boolean {
  */
 export function NodeColumnView(props: NodeColumnViewProps): ReactNode {
   const { column, width } = props
+  const t = useT()
   const rollupDensity = width < ROLLUP_DOTS_WIDTH ? 'dots' : 'cluster'
   return (
     <div className="cm-node-col" style={{ width }}>
@@ -426,7 +428,7 @@ export function NodeColumnView(props: NodeColumnViewProps): ReactNode {
                           className="cm-icon-btn cm-chevron"
                           data-open={!row.collapsed}
                           aria-expanded={!row.collapsed}
-                          aria-label={row.collapsed ? '展开对话列表' : '收起对话列表'}
+                          aria-label={row.collapsed ? t('columns.expandThreads') : t('columns.collapseThreads')}
                           onClick={(event) => { event.stopPropagation(); props.onToggleNode(row.id) }}
                         >
                           <FoldGlyph />
@@ -439,7 +441,7 @@ export function NodeColumnView(props: NodeColumnViewProps): ReactNode {
                   {row.note !== undefined && <span className="cm-row-note">{row.note}</span>}
                 </span>
                 {row.childCount > 0 && !showStatus && (
-                  <span className="cm-child-count" title={`${row.childCount} 个下级节点`}>{row.childCount}</span>
+                  <span className="cm-child-count" title={t('columns.childCount', { n: row.childCount })}>{row.childCount}</span>
                 )}
                 <StatusRollupBadge rollup={row.rollup} density={rollupDensity} />
                 {row.tools && (
@@ -448,9 +450,9 @@ export function NodeColumnView(props: NodeColumnViewProps): ReactNode {
                       type="button"
                       className="cm-icon-btn"
                       title={row.kind === 'node'
-                        ? '在这个节点下发起新对话'
-                        : row.kind === 'ungrouped' ? '在未分组发起对话' : '在该工作区发起新对话'}
-                      aria-label="发起对话"
+                        ? t('columns.newThreadInNode')
+                        : row.kind === 'ungrouped' ? t('columns.newThreadInUngrouped') : t('columns.newThreadInWorkspace')}
+                      aria-label={t('common.startConversation')}
                       onClick={(event) => { event.stopPropagation(); props.onNewThread(row.id) }}
                     >
                       <NewThreadGlyph />
@@ -459,8 +461,8 @@ export function NodeColumnView(props: NodeColumnViewProps): ReactNode {
                       <button
                         type="button"
                         className="cm-icon-btn"
-                        title="更多"
-                        aria-label="更多"
+                        title={t('common.more')}
+                        aria-label={t('common.more')}
                         onClick={(event) => {
                           event.stopPropagation()
                           const rect = event.currentTarget.getBoundingClientRect()
@@ -525,8 +527,8 @@ export function NodeColumnView(props: NodeColumnViewProps): ReactNode {
                     <button
                       type="button"
                       className="cm-icon-btn"
-                      title="更多"
-                      aria-label="更多"
+                      title={t('common.more')}
+                      aria-label={t('common.more')}
                       onClick={(event) => {
                         event.stopPropagation()
                         const rect = event.currentTarget.getBoundingClientRect()

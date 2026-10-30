@@ -9,7 +9,7 @@
  * `html[data-conversation-map-split]`), so everything the band needs to know is
  * measured from the live DOM:
  *
- * - where the centre column starts, in the overlay layer's coordinates;
+ * - where the centre column's box starts, in the overlay layer's coordinates;
  * - how wide the centre column currently is (a right Sidebar, a window resize,
  *   and the left column's collapse all change it);
  * - how tall the shipped Conversation header is (40px blank / 76px with a
@@ -19,6 +19,13 @@
  *   seat actually measures — the second number is what tells the band whether
  *   the shell's second seat button is still mounted (styles.ts hides it while
  *   the band occupies that edge).
+ *
+ * The overlay layer spans the frame's border box, while the frame itself can be
+ * padded: the Windows desktop shell keeps its caption row in that padding, so
+ * the Conversation column's top edge sits below the overlay's top edge. Both
+ * offsets the band consumes (`left` and `top`) are therefore measured against
+ * the same layer, never against each other's element — the band is the
+ * Conversation column's box on every platform.
  *
  * The hook re-measures from a `ResizeObserver` on the Conversation root, on
  * window resize, and on the caller's revision (main-panel selection). A missing
@@ -33,6 +40,8 @@ export interface BandFrame {
   ready: boolean
   /** Band left edge, relative to the frame-wide overlay layer. */
   left: number
+  /** Band top edge, relative to the frame-wide overlay layer. */
+  top: number
   /** Width of the product's centre column (band + shipped Conversation). */
   centerWidth: number
   /** Height of the shipped Conversation header. */
@@ -58,6 +67,7 @@ export interface BandFrame {
 export const FALLBACK_FRAME: BandFrame = {
   ready: false,
   left: 0,
+  top: 0,
   centerWidth: 0,
   headerHeight: 76,
   headTop: 10,
@@ -121,6 +131,26 @@ function leadingInset(frameElement: HTMLElement | null, seatRight: number): numb
   return Math.max(20, chosen)
 }
 
+/**
+ * The Conversation column's box in the overlay layer's own coordinates.
+ *
+ * The overlay layer covers the frame's border box while the frame can be padded
+ * (the Windows desktop shell keeps its caption row in that padding), so an
+ * element measured against the conversation and one measured against the layer
+ * would disagree by the padding. Returning both numbers here keeps the band on
+ * top of the Conversation column on every platform: `top` is 0 on macOS/Web and
+ * the caption-row height on Windows desktop.
+ * @param layer - the frame-wide overlay layer's rect.
+ * @param target - the Conversation column root's rect.
+ * @returns the rounded box, relative to the overlay layer.
+ */
+export function overlayOffset(
+  layer: Pick<DOMRect, 'left' | 'top'>,
+  target: Pick<DOMRect, 'left' | 'top'>,
+): { left: number; top: number } {
+  return { left: Math.round(target.left - layer.left), top: Math.round(target.top - layer.top) }
+}
+
 /** Measure the live frame; returns the fallback when the column is not mounted. */
 function measureFrame(): BandFrame {
   if (typeof document === 'undefined') return FALLBACK_FRAME
@@ -130,6 +160,7 @@ function measureFrame(): BandFrame {
   const layerRect = layer.getBoundingClientRect()
   const conversationRect = conversation.getBoundingClientRect()
   if (conversationRect.width <= 0 || conversationRect.height <= 0) return FALLBACK_FRAME
+  const offset = overlayOffset(layerRect, conversationRect)
   const leading = conversation.querySelector('[data-conversation-header-leading]') as HTMLElement | null
   const header = (leading?.closest('header') ?? conversation.querySelector('header')) as HTMLElement | null
   const leadingRect = leading?.getBoundingClientRect()
@@ -137,7 +168,8 @@ function measureFrame(): BandFrame {
   const seat = leadingSeat()
   return {
     ready: true,
-    left: Math.round(conversationRect.left - layerRect.left),
+    left: offset.left,
+    top: offset.top,
     centerWidth: Math.round(conversationRect.width),
     headerHeight: Math.round(headerHeight),
     headTop: leadingRect === undefined ? 10 : Math.round(leadingRect.top - conversationRect.top),
@@ -151,6 +183,7 @@ function measureFrame(): BandFrame {
 function sameFrame(left: BandFrame, right: BandFrame): boolean {
   return left.ready === right.ready
     && left.left === right.left
+    && left.top === right.top
     && left.centerWidth === right.centerWidth
     && left.headerHeight === right.headerHeight
     && left.headTop === right.headTop

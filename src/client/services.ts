@@ -14,7 +14,11 @@
  */
 import { useCallback, useSyncExternalStore } from 'react'
 
+import type { LocaleService } from './locale.js'
 import type { MapStore } from './map-store.js'
+
+/** The DSH client locale service face this plugin uses (see `locale.tsx`). */
+export type { LocaleService } from './locale.js'
 
 /** A readable, subscribable value source. */
 export interface ObservableSnapshot<T> {
@@ -120,6 +124,13 @@ export interface MapServices {
   /** Host-authoritative Workspace list plus its mutations. */
   workspaces: WorkspacesService
   /**
+   * The active DSH client locale service.
+   *
+   * Absent only in pure render tests, which then fall back to the plugin's
+   * built-in Simplified Chinese dictionary. Production always injects it.
+   */
+  locale?: LocaleService | undefined
+  /**
    * The authoritative map document: loaded from and committed to the Host,
    * with a localStorage-only fallback when no Host channel is available.
    */
@@ -177,6 +188,11 @@ export interface ClientContext {
   readonly sessions: SessionsService
   /** Main-panel selection; consumed so the map can hide itself behind panels. */
   readonly layout: LayoutService
+  /**
+   * The DSH client locale service: dictionary registration, the namespace
+   * translator, and the active-language subscription. Required by `inject`.
+   */
+  readonly locale: LocaleService
   /** Read an optional service by name (undefined when the profile does not provide it). */
   get(name: string): unknown
   effect(callback: () => unknown, label?: string): unknown

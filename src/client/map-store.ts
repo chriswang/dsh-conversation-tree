@@ -11,7 +11,8 @@
  *
  * `ViewState` stays in `localStorage` and is not this store's concern.
  */
-import { emptyMap, ensureDefaultSpace, type MapState } from '../shared/model.js'
+import { emptyMap, ensureDefaultSpace, MapError, type MapState } from '../shared/model.js'
+import type { Translate } from '../shared/copy.js'
 import type { ContentSearchHit, ContentSearchReply, ContentSearchRequest } from '../shared/search.js'
 import { loadMap, saveMap, STORAGE_KEY, type KeyValueStore } from '../shared/persistence.js'
 
@@ -29,6 +30,41 @@ export const LOCAL_BACKUP_KEY = 'dsh.conversation-map.v1.host-backup'
 /** Lifecycle of the store. */
 export type MapPhase = 'loading' | 'ready' | 'local'
 
+/**
+ * One synchronization notice, localized only at the render site.
+ *
+ * The store never holds user-facing copy: it reports what happened and lets the
+ * UI translate it, exactly like a model issue code. `host-error` is the one
+ * opaque case — a Host wire message is external data and renders verbatim.
+ */
+export type MapNotice =
+  | { readonly kind: 'sync-retry'; readonly detail: string }
+  | { readonly kind: 'local-adopted' }
+  | { readonly kind: 'dropped-changes'; readonly count: number }
+  | { readonly kind: 'refreshed-conflict' }
+  | { readonly kind: 'host-error'; readonly message: string }
+
+/**
+ * Format one store notice through the active dictionary.
+ * @param t - the active translator (namespace `conversation-map`).
+ * @param notice - the notice the store published.
+ * @returns the user-facing sentence.
+ */
+export function formatMapNotice(t: Translate, notice: MapNotice): string {
+  switch (notice.kind) {
+    case 'sync-retry':
+      return t('store.syncRetry', { detail: notice.detail })
+    case 'local-adopted':
+      return t('store.localAdopted')
+    case 'dropped-changes':
+      return t('store.droppedChanges', { count: notice.count })
+    case 'refreshed-conflict':
+      return t('store.refreshedConflict')
+    case 'host-error':
+      return notice.message
+  }
+}
+
 /** One immutable snapshot read by React. */
 export interface MapStoreSnapshot {
   /** `loading` until the Host (or local fallback) document is settled. */
@@ -39,8 +75,8 @@ export interface MapStoreSnapshot {
   readonly revision: number
   /** Number of local mutations not yet acknowledged by the Host. */
   readonly pending: number
-  /** Last synchronization/conflict message, when there is one. */
-  readonly error?: string
+  /** Last synchronization/conflict notice, when there is one. */
+  readonly error?: MapNotice
 }
 
 /** Outcome of a local mutation attempt. */
@@ -220,7 +256,7 @@ export function createMapStore(options: MapStoreOptions): MapStore {
   let doc = ensureDefaultSpace(loadMap(storage))
   let hostRevision = 0
   let pending: Array<(current: MapState) => MapState> = []
-  let lastError: string | undefined
+  let lastError: MapNotice | undefined
   let snapshot: MapStoreSnapshot = buildSnapshot()
 
   let pollTimer: unknown
@@ -327,7 +363,7 @@ export function createMapStore(options: MapStoreOptions): MapStore {
       notify()
       return true
     } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error)
+      lastError = { kind: 'host-error', message: error instanceof Error ? error.message : String(error) }
       notify()
       return false
     }
@@ -370,7 +406,7 @@ export function createMapStore(options: MapStoreOptions): MapStore {
         } else if (put.error.code === 'map/conflict') {
           const adopted = await adoptHost()
           if (!adopted) throw new Error(put.error.message)
-          lastError = '本地对话树与 Host 不一致，已备份本地副本并采用 Host 版本'
+          lastError = { kind: 'local-adopted' }
           notify()
           clearLocalMain()
         } else {
@@ -381,7 +417,7 @@ export function createMapStore(options: MapStoreOptions): MapStore {
         if (localHasContent) {
           backupLocal(local)
           if (!sameDocument(local, host)) {
-            lastError = '本地对话树与 Host 不一致，已备份本地副本并采用 Host 版本'
+            lastError = { kind: 'local-adopted' }
           }
           clearLocalMain()
         }
@@ -414,7 +450,7 @@ export function createMapStore(options: MapStoreOptions): MapStore {
               reply = await call('put', { baseRevision: hostRevision, doc, client: tabId })
         } catch (error) {
           pending = batch.concat(pending)
-          lastError = `同步中断，重试中（${error instanceof Error ? error.message : String(error)}）`
+          lastError = { kind: 'sync-retry', detail: error instanceof Error ? error.message : String(error) }
           notify()
           scheduleRetry()
           return
@@ -425,7 +461,7 @@ export function createMapStore(options: MapStoreOptions): MapStore {
             latest = await call('state', {})
           } catch (error) {
             pending = batch.concat(pending)
-            lastError = `同步中断，重试中（${error instanceof Error ? error.message : String(error)}）`
+            lastError = { kind: 'sync-retry', detail: error instanceof Error ? error.message : String(error) }
             notify()
             scheduleRetry()
             return
@@ -442,13 +478,13 @@ export function createMapStore(options: MapStoreOptions): MapStore {
           }
           doc = rebased
           hostRevision = value.revision
-          lastError = dropped > 0 ? `有 ${String(dropped)} 项操作因节点已被修改而放弃` : undefined
+          lastError = dropped > 0 ? { kind: 'dropped-changes', count: dropped } : undefined
           notify()
           if (dropped === batch.length) continue
           try {
             reply = await call('put', { baseRevision: hostRevision, doc, client: tabId })
           } catch (error) {
-            lastError = `同步中断，重试中（${error instanceof Error ? error.message : String(error)}）`
+            lastError = { kind: 'sync-retry', detail: error instanceof Error ? error.message : String(error) }
             notify()
             scheduleRetry()
             return
@@ -456,18 +492,18 @@ export function createMapStore(options: MapStoreOptions): MapStore {
           if (!reply.ok) {
             if (reply.error.code === 'map/conflict') {
               await adoptHost()
-              lastError = '对话树已被其它写入者修改，已刷新为最新版本'
+              lastError = { kind: 'refreshed-conflict' }
               notify()
               return
             }
             await adoptHost()
-            lastError = reply.error.message
+            lastError = { kind: 'host-error', message: reply.error.message }
             notify()
             return
           }
         } else if (!reply.ok) {
           pending = batch.concat(pending)
-          lastError = reply.error.message
+          lastError = { kind: 'host-error', message: reply.error.message }
           notify()
           return
         }
@@ -493,7 +529,7 @@ export function createMapStore(options: MapStoreOptions): MapStore {
       try {
         await runFlush()
       } catch (error) {
-        lastError = `同步中断，重试中（${error instanceof Error ? error.message : String(error)}）`
+        lastError = { kind: 'sync-retry', detail: error instanceof Error ? error.message : String(error) }
         notify()
       } finally {
         flushing = undefined
@@ -585,7 +621,7 @@ export function createMapStore(options: MapStoreOptions): MapStore {
       const payload = options.force === true ? {} : { sinceRevision: hostRevision }
       const reply = await call('state', payload)
       if (!reply.ok) {
-        lastError = reply.error.message
+        lastError = { kind: 'host-error', message: reply.error.message }
         notify()
         return
       }
@@ -602,7 +638,7 @@ export function createMapStore(options: MapStoreOptions): MapStore {
       adopt(value.doc, value.revision)
       notify()
     } catch (error) {
-      lastError = `同步中断，重试中（${error instanceof Error ? error.message : String(error)}）`
+      lastError = { kind: 'sync-retry', detail: error instanceof Error ? error.message : String(error) }
       notify()
     } finally {
       refreshing = false
@@ -624,7 +660,9 @@ export function createMapStore(options: MapStoreOptions): MapStore {
     },
     update(change: (current: MapState) => MapState): MapUpdateResult {
       if (disposed) return { ok: false, error: new Error('conversation-map: store disposed') }
-      if (phase === 'loading') return { ok: false, error: new Error('对话树仍在加载，请稍后再试。') }
+      if (phase === 'loading') {
+        return { ok: false, error: new MapError('STORE_LOADING', 'The conversation tree is still loading; try again shortly.') }
+      }
       let next: MapState
       try {
         next = change(doc)

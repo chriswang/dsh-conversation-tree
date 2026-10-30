@@ -130,6 +130,16 @@ export interface SearchView {
   empty: boolean
 }
 
+/** Localized context labels the search view composes its lines from. */
+export interface SearchContextLabels {
+  /** Label for conversations and topics that belong to no Workspace. */
+  ungrouped: string
+  /** Label used when a hit's conversation has no usable title. */
+  untitled: string
+  /** Fallback when a Workspace title is missing from the input map. */
+  workspaceFallback: string
+}
+
 /** Injectable context the search view needs from the panel. */
 export interface SearchViewInput {
   /** The map document (for node paths and conversation homes). */
@@ -142,13 +152,9 @@ export interface SearchViewInput {
   workspaceTitles: Readonly<Record<string, string>>
   /** Body hits by session id, when the Host index has answered. */
   contentHits?: ReadonlyMap<string, ContentSearchHit>
+  /** Localized labels for the context lines; the render site owns the dictionary. */
+  labels: SearchContextLabels
 }
-
-/** Label used for conversations and topics that belong to no Workspace. */
-const UNGROUPED_LABEL = '未分组'
-
-/** Label used when a hit's conversation has no usable title. */
-const UNTITLED_LABEL = '未命名对话'
 
 /** Newest activity first, for equal-rank hits. */
 function byActivity(left: { updatedAt: string }, right: { updatedAt: string }): number {
@@ -160,10 +166,11 @@ function nodeContext(
   state: MapState,
   node: MapNode,
   workspaceTitles: Readonly<Record<string, string>>,
+  labels: SearchContextLabels,
 ): string {
   const workspace = node.workspaceId === null || node.workspaceId === undefined
-    ? UNGROUPED_LABEL
-    : workspaceTitles[node.workspaceId] ?? '工作区'
+    ? labels.ungrouped
+    : workspaceTitles[node.workspaceId] ?? labels.workspaceFallback
   const ancestors = nodePath(state, node.id).slice(0, -1).map(pathNode => pathNode.title)
   return ancestors.length === 0 ? workspace : `${workspace} / ${ancestors.join(' / ')}`
 }
@@ -173,10 +180,11 @@ function threadContext(
   state: MapState,
   thread: ThreadRef,
   workspaceTitles: Readonly<Record<string, string>>,
+  labels: SearchContextLabels,
 ): string {
   const workspace = thread.workspaceId === null || thread.workspaceId === undefined
-    ? UNGROUPED_LABEL
-    : workspaceTitles[thread.workspaceId] ?? '工作区'
+    ? labels.ungrouped
+    : workspaceTitles[thread.workspaceId] ?? labels.workspaceFallback
   if (thread.nodeId === null) return workspace
   const path = nodePath(state, thread.nodeId).map(pathNode => pathNode.title)
   return path.length === 0 ? workspace : `${workspace} / ${path.join(' / ')}`
@@ -194,7 +202,7 @@ function threadContext(
  * @returns the ranked nodes, ranked conversations, and their navigation order.
  */
 export function buildSearchView(input: SearchViewInput): SearchView {
-  const { state, results, candidateThreads, workspaceTitles } = input
+  const { state, results, candidateThreads, workspaceTitles, labels } = input
   const contentHits = input.contentHits ?? new Map<string, ContentSearchHit>()
 
   const nodes: SearchNodeItem[] = results.nodes.map((hit): SearchNodeItem => ({
@@ -202,7 +210,7 @@ export function buildSearchView(input: SearchViewInput): SearchView {
     key: hit.node.id,
     node: hit.node,
     title: hit.node.title,
-    context: nodeContext(state, hit.node, workspaceTitles),
+    context: nodeContext(state, hit.node, workspaceTitles, labels),
     snippet: hit.descriptionMatch === null
       ? null
       : snippetAround(hit.node.description, hit.descriptionMatch.start, hit.descriptionMatch.end),
@@ -227,8 +235,8 @@ export function buildSearchView(input: SearchViewInput): SearchView {
     kind: 'thread',
     key: thread.sessionId,
     thread,
-    title: thread.title.trim() === '' ? UNTITLED_LABEL : thread.title,
-    context: threadContext(state, thread, workspaceTitles),
+    title: thread.title.trim() === '' ? labels.untitled : thread.title,
+    context: threadContext(state, thread, workspaceTitles, labels),
     snippet: body?.snippet ?? null,
     titleMatch,
     bodyMatch: body !== undefined,

@@ -40,6 +40,7 @@
 import { openBandCollapseMemory, openFirstRunHint, type BandCollapseStore } from '../shared/mode-memory.js'
 import { loadView } from '../shared/view-state.js'
 import { MapEntryBridge, MapLauncher, MapPanelIcon } from './Entries.js'
+import { NS, zh, en } from './locales/index.js'
 import { MapPanel } from './MapPanel.js'
 import type {
   ClientContext, CurrentSessionLike, MapServices, PickDirectory, UiSessionLike,
@@ -53,9 +54,10 @@ import { browserStorage } from './storage.js'
 import { createBandProtocol } from './band-owner.js'
 import { openBandSlot } from './band-slot.js'
 import { ensureStyles } from './styles.js'
+import { MapError } from '../shared/model.js'
 
 /** Services this plugin needs before it activates. */
-export const inject = ['slots', 'sessions', 'workspaces', 'layout']
+export const inject = ['slots', 'sessions', 'workspaces', 'layout', 'locale']
 
 /** `ctx.remote` subset used for the already-forwarded Session events. */
 interface ClientRemoteLike {
@@ -117,11 +119,11 @@ function resolvePicker(ctx: ClientContext): PickDirectory {
     }).__DSH_DIRECTORY_PICKER__
     if (desktop !== undefined && typeof desktop.pick === 'function') return desktop.pick()
     if (isMacClient()) {
-      throw new Error('macOS 上由后台进程拉起的系统目录面板无法接受点击。')
+      throw new MapError('PICKER_MACOS', 'The Host-spawned directory picker cannot take clicks on macOS.')
     }
     const navigation = ctx.get('uiWorkspace') as DirectoryPickingLike | undefined
     if (navigation === undefined || typeof navigation.pickDirectory !== 'function') {
-      throw new Error('当前客户端没有提供目录选择器。')
+      throw new MapError('PICKER_MISSING', 'The current client provides no directory picker.')
     }
     return navigation.pickDirectory()
   }
@@ -136,7 +138,7 @@ function resolveOpenSession(ctx: ClientContext): (target: unknown) => void {
   return (target: unknown): void => {
     const navigation = ctx.get('uiWorkspace') as UiWorkspaceLike | undefined
     if (navigation === undefined || typeof navigation.openSession !== 'function') {
-      throw new Error('当前客户端没有提供会话导航（uiWorkspace.openSession）。')
+      throw new MapError('NAV_MISSING', 'The current client provides no Session navigation (uiWorkspace.openSession).')
     }
     navigation.openSession(target)
   }
@@ -203,6 +205,13 @@ function toggleLeftSidebar(ctx: ClientContext): void {
  */
 export function apply(ctx: ClientContext): void {
   ensureStyles()
+
+  // Register both shipped dictionaries once the locale service is on the tree;
+  // the registration is an effect so unloading the plugin withdraws the copy.
+  // `t` reads the active language at call time, so late language switches also
+  // reach registration-time copy such as the panel row's label thunk.
+  const t = ctx.locale.bind(NS)
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'conversation-map: locale dictionaries')
 
   const workspaces = ctx.get('workspaces') as WorkspacesService | undefined
   if (workspaces === undefined) throw new Error('conversation-map: the Workspace service is unavailable')
@@ -350,7 +359,7 @@ export function apply(ctx: ClientContext): void {
     try {
       const result = await protocol.acquire()
       if (!result.acquired) {
-        showBandNotice('另一个左侧面板正在使用，请先收起它')
+        showBandNotice(t('common.bandBusy'))
         return
       }
       // The band's session context comes back with the band: switch the column
@@ -387,6 +396,7 @@ export function apply(ctx: ClientContext): void {
   const services: MapServices = {
     sessions: ctx.sessions,
     workspaces,
+    locale: ctx.locale,
     store,
     statusLedger,
     panelInfo: ctx.layout.panelInfo,
@@ -554,7 +564,7 @@ export function apply(ctx: ClientContext): void {
   // seam should express (the sidebar panel row stays as the map's entry).
   ctx.effect(() => ctx.slots.inject('conversation.header.leading', () => ctx.slots.register({
     name: 'conversation.header.leading',
-    inject: () => ({ collapsed, hint, bandSlot }),
+    inject: () => ({ collapsed, hint, bandSlot, locale: ctx.locale }),
   }, MapLauncher)), 'conversation-map: conversation-header entry')
 
   // The entry bridge: the `main` panel the sidebar's panel row dispatches to.
@@ -569,6 +579,7 @@ export function apply(ctx: ClientContext): void {
     key: PANEL_ID,
     inject: () => ({
       collapsed,
+      locale: ctx.locale,
       reveal: revealConversation,
       open: openBand,
     }),
@@ -585,8 +596,17 @@ export function apply(ctx: ClientContext): void {
     name: 'sidebar.panellist',
     id: PANEL_ID,
     order: 30,
-    label: '对话树',
-    inject: () => ({ collapsed, panelInfo: ctx.layout.panelInfo, store, statusLedger, activate: activateEntry }),
+    // A thunk is resolved at read time, so switching the DSH language renames
+    // the shell-owned row without re-registering the entry.
+    label: () => t('common.panelTitle'),
+    inject: () => ({
+      collapsed,
+      panelInfo: ctx.layout.panelInfo,
+      store,
+      statusLedger,
+      locale: ctx.locale,
+      activate: activateEntry,
+    }),
   }, MapPanelIcon)), 'conversation-map: sidebar panel row')
 
   // The map band exists only while the band is expanded. It is a frame-wide

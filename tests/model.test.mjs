@@ -7,6 +7,9 @@
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
 
+/** The Simplified Chinese Workspace-title fallbacks these tests pin. */
+const ZH_TITLES = { defaultWorkspace: '默认工作区', workspaceFallback: '工作区' }
+
 import {
   DEFAULT_SPACE_TITLE, LOOSE_ROW_PREFIX, MAX_SPACES, MAX_DEPTH, MapError, UNGROUPED_ID, adoptThread, ancestorRowKeys,
   assignThreadIssue, assignThreads, breadcrumb, childrenOf, conversationVisible, createNode, createSpace, deleteNode, deleteSpace, descendantIds,
@@ -538,9 +541,9 @@ test('deleting a top-level node selects its Workspace', () => {
 })
 
 test('Workspace titles prefer the stored title, then the directory name', () => {
-  assert.equal(workspaceDisplayTitle({ title: '外贸探索', path: '/tmp/x' }), '外贸探索')
-  assert.equal(workspaceDisplayTitle({ title: 'default-workspace', path: '/tmp/x' }), '默认工作区')
-  assert.equal(workspaceDisplayTitle({ title: '', path: '/home/me/projects/task-map/' }), 'task-map')
+  assert.equal(workspaceDisplayTitle({ title: '外贸探索', path: '/tmp/x' }, ZH_TITLES), '外贸探索')
+  assert.equal(workspaceDisplayTitle({ title: 'default-workspace', path: '/tmp/x' }, ZH_TITLES), '默认工作区')
+  assert.equal(workspaceDisplayTitle({ title: '', path: '/home/me/projects/task-map/' }, ZH_TITLES), 'task-map')
   assert.equal(pathBaseName('/home/me/projects/task-map/'), 'task-map')
   assert.equal(pathBaseName('C:\\work\\alpha'), 'alpha')
 })
@@ -1000,16 +1003,16 @@ test('an unknown Session with no Workspace has no place to land', () => {
 
 test('moveNodeIssue names every reason a re-parent is refused', () => {
   const state = seed()
-  assert.deepEqual(moveNodeIssue(state, 'ghost', null), { code: 'NOT_FOUND', message: '节点已不存在，请刷新。' })
-  assert.deepEqual(moveNodeIssue(state, 'a1', 'ghost'), { code: 'NOT_FOUND', message: '节点已不存在，请刷新。' })
+  assert.deepEqual(moveNodeIssue(state, 'ghost', null), { code: 'NOT_FOUND', message: 'The target node no longer exists; refresh and try again.' })
+  assert.deepEqual(moveNodeIssue(state, 'a1', 'ghost'), { code: 'NOT_FOUND', message: 'The target node no longer exists; refresh and try again.' })
   assert.deepEqual(moveNodeIssue(state, 'a1', 'b'), {
-    code: 'WORKSPACE', message: '不能把节点移动到其他工作区的节点下。',
+    code: 'WORKSPACE', message: 'A node cannot move under a node of a different Workspace.',
   })
   assert.deepEqual(moveNodeIssue(state, 'a', 'a'), {
-    code: 'CYCLE', message: '不能把节点移动到它自己或它的子节点下。',
+    code: 'CYCLE', message: 'A node cannot move under itself or its descendants.',
   })
   assert.deepEqual(moveNodeIssue(state, 'a', 'a1'), {
-    code: 'CYCLE', message: '不能把节点移动到它自己或它的子节点下。',
+    code: 'CYCLE', message: 'A node cannot move under itself or its descendants.',
   })
   assert.equal(moveNodeIssue(state, 'a1', null), null, 'the Workspace root is always in reach')
   const sibling = createNode(state, { parentId: null, workspaceId: 'w1', title: '第二个主题', id: 'a2' }).state
@@ -1031,11 +1034,11 @@ test('moveNodeIssue enforces depth as target depth plus subtree height', () => {
   tall = createNode(tall, { parentId: 'tall', title: '叶子', id: 'tall-leaf' }).state
 
   assert.deepEqual(moveNodeIssue(tall, 'tall', `c${MAX_DEPTH - 1}`), {
-    code: 'DEPTH', message: `最多支持 ${MAX_DEPTH} 层。`,
+    code: 'DEPTH', message: `At most ${MAX_DEPTH} levels are supported.`, params: { max: MAX_DEPTH },
   }, '11 + a two-node subtree breaks the ceiling')
   assert.equal(moveNodeIssue(tall, 'tall', `c${MAX_DEPTH - 2}`), null, 'exactly 12 levels still fits')
   assert.deepEqual(moveNodeIssue(tall, 'c1', 'tall'), {
-    code: 'DEPTH', message: `最多支持 ${MAX_DEPTH} 层。`,
+    code: 'DEPTH', message: `At most ${MAX_DEPTH} levels are supported.`, params: { max: MAX_DEPTH },
   }, 'a 12-deep subtree cannot hang under another root')
 })
 
@@ -1063,9 +1066,9 @@ test('assignThreadIssue mirrors the conversation rules and names the refusing co
   assert.equal(assignThreadIssue(state, 'own', 'a1'), null, 'a node of its own Workspace is committable')
   assert.equal(assignThreadIssue(state, 'own', null), null, 'so is the Workspace row itself')
   assert.deepEqual(assignThreadIssue(state, 'foreign', 'a1'), {
-    code: 'WORKSPACE', message: '只能把对话关联到它所属工作区里的节点。',
+    code: 'WORKSPACE', message: 'A conversation can only be filed under a node of its own Workspace.',
   })
-  assert.deepEqual(assignThreadIssue(state, 'own', 'ghost'), { code: 'NOT_FOUND', message: '节点已不存在，请刷新。' })
+  assert.deepEqual(assignThreadIssue(state, 'own', 'ghost'), { code: 'NOT_FOUND', message: 'The target node no longer exists; refresh and try again.' })
   assert.equal(assignThreadIssue(state, 'never-indexed', 'a1'), null, 'an unknown Session holds no row to file')
 
   const unreconciled = {
@@ -1083,7 +1086,7 @@ test('assignThreadIssue refuses a subagent conversation by origin and by ledger'
   }
   const byOrigin = { ...state, threads: [...state.threads, child] }
   assert.deepEqual(assignThreadIssue(byOrigin, 'child-row', 'a1'), {
-    code: 'SUBAGENT', message: '子智能体会话不能挂到节点下。',
+    code: 'SUBAGENT', message: 'A subagent conversation cannot be filed under a topic.',
   })
   assert.deepEqual(assignThreadIssue(byOrigin, 'child-row', null)?.code, 'SUBAGENT',
     'a child is refused even for the Workspace row')
@@ -1102,7 +1105,7 @@ test('assignThreadIssue keeps the rootless-topic space rule', () => {
   const work = createSpace(state, { title: '工作空间' })
   const elsewhere = setThreadSpace(work.state, 's3', work.id)
   assert.deepEqual(assignThreadIssue(elsewhere, 's3', 'u1'), {
-    code: 'SPACE', message: '只能把默认空间的未分组对话关联到未分组主题。',
+    code: 'SPACE', message: 'Only ungrouped conversations in the default space can be filed under the ungrouped topic.',
   })
   assert.throws(
     () => assignThreads(elsewhere, ['s3'], 'u1'),
@@ -1138,12 +1141,12 @@ test('assignThreads refuses a subagent conversation and keeps a rejected batch a
 
 test('threadMoveTargets lists the Workspace row first, then the tree depth-first', () => {
   const state = seed()
-  assert.deepEqual(threadMoveTargets(state, 'w1'), [
+  assert.deepEqual(threadMoveTargets(state, 'w1', '（工作区顶层）'), [
     { nodeId: null, label: '（工作区顶层）' },
     { nodeId: 'a', label: '外贸探索' },
     { nodeId: 'a1', label: '外贸探索 / 获客方式' },
   ])
-  assert.deepEqual(threadMoveTargets(state, 'w2'), [
+  assert.deepEqual(threadMoveTargets(state, 'w2', '（工作区顶层）'), [
     { nodeId: null, label: '（工作区顶层）' },
     { nodeId: 'b', label: '产品设计' },
   ])
@@ -1259,7 +1262,7 @@ test('insertNodeBefore refuses an anchor that is not a child of the target paren
 
   assert.throws(
     () => insertNodeBefore(state, 'A', 'p', 'Q'),
-    (error) => error instanceof MapError && error.code === 'ANCHOR' && error.message === '锚点节点不在目标位置下。',
+    (error) => error instanceof MapError && error.code === 'ANCHOR' && error.message === 'The anchor node is not under the target parent.',
   )
   assert.throws(
     () => insertNodeBefore(state, 'A', 'p', 'other'),
@@ -1329,3 +1332,20 @@ test('moveNode still appends, so same-parent reordering stays insertNodeBefore\'
   assert.deepEqual(idsUnder(insertNodeBefore(state, 'C', 'p', 'B'), 'p'), ['A', 'C', 'B'])
 })
 
+
+test('a legacy default-space title migrates to the neutral marker, user titles stay verbatim', () => {
+  const legacy = {
+    version: 2,
+    revision: 1,
+    nodes: [],
+    threads: [],
+    spaces: [{ id: 'sp-1', title: '默认空间', position: 1, createdAt: '' }],
+    defaultSpaceId: 'sp-1',
+    spaceOf: {},
+    subagentSessionIds: [],
+  }
+  const migrated = parseMapState(JSON.stringify(legacy))
+  assert.equal(migrated.spaces[0].title, DEFAULT_SPACE_TITLE, 'the legacy marker is rewritten on read')
+  const renamed = { ...legacy, spaces: [{ ...legacy.spaces[0], title: '工作空间' }] }
+  assert.equal(parseMapState(JSON.stringify(renamed)).spaces[0].title, '工作空间', 'a typed title is user data')
+})

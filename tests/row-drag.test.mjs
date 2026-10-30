@@ -12,7 +12,8 @@ import { test } from 'node:test'
 import {
   assignThreads, childrenOf, createNode, emptyMap, insertNodeBefore, syncThreads, threadsOf,
 } from '../lib/model.js'
-import { DRAG_THRESHOLD_PX, decideDrop, exceedsDragThreshold } from '../lib/row-drag.js'
+import { DRAG_THRESHOLD_PX, decideDrop, exceedsDragThreshold, formatDragLabel } from '../lib/row-drag.js'
+import { createTranslator, zh } from '../lib/locales.js'
 
 /** A topic row under the pointer. */
 function nodeRow(nodeId, workspaceId = 'w1') {
@@ -26,6 +27,18 @@ function workspaceRow(workspaceId = 'w1') {
 
 /** The pointer is not over any droppable row. */
 const NO_ROW = { kind: 'none' }
+
+/** The Simplified Chinese translator: these cases pin the wording the pointer shows. */
+const tZh = createTranslator(zh)
+
+/**
+ * Format a decision's structured pointer label.
+ * @param decision - the decision under test.
+ * @returns the localized label.
+ */
+function label(decision) {
+  return formatDragLabel(tZh, decision.label)
+}
 
 /** The pointer is over the middle of a row. */
 function into(row) {
@@ -90,14 +103,14 @@ test('a conversation drops under a topic of its own Workspace', () => {
   assert.deepEqual(decision.action, { kind: 'thread', sessionId: 's1', nodeId: 'a1' })
   assert.equal(decision.issue, null)
   assert.equal(decision.noop, false)
-  assert.equal(decision.label, '移到「获客方式」下')
+  assert.equal(label(decision), '移到「获客方式」下')
 })
 
 test('a conversation drops back under its Workspace row', () => {
   const decision = decideDrop(seed(), { kind: 'session', sessionId: 's1', workspaceId: 'w1' }, into(workspaceRow('w1')))
   assert.deepEqual(decision.action, { kind: 'thread', sessionId: 's1', nodeId: null })
   assert.equal(decision.issue, null)
-  assert.equal(decision.label, '移到工作区下')
+  assert.equal(label(decision), '移到工作区下')
 })
 
 test('a conversation already filed there reports no change', () => {
@@ -106,7 +119,7 @@ test('a conversation already filed there reports no change', () => {
   assert.equal(sameNode.noop, true)
   assert.equal(sameNode.action, null, 'a no-op hands the store nothing to commit')
   assert.equal(sameNode.issue, null)
-  assert.equal(sameNode.label, '位置不变')
+  assert.equal(label(sameNode), '位置不变')
 
   const sameRow = decideDrop(state, { kind: 'session', sessionId: 's2', workspaceId: 'w2' }, into(workspaceRow('w2')))
   assert.equal(sameRow.noop, true)
@@ -119,31 +132,31 @@ test('a conversation never crosses Workspaces, not even onto an L1 row', () => {
   assert.equal(foreignNode.issue.code, 'WORKSPACE')
   assert.equal(foreignNode.action, null)
   assert.equal(foreignNode.noop, false)
-  assert.equal(foreignNode.label, '不能移到别的工作区')
+  assert.equal(label(foreignNode), '不能移到别的工作区')
 
   const foreignRow = decideDrop(state, { kind: 'session', sessionId: 's1', workspaceId: 'w1' }, into(workspaceRow('w2')))
   assert.equal(foreignRow.issue.code, 'WORKSPACE')
-  assert.equal(foreignRow.label, '不能移到别的工作区')
+  assert.equal(label(foreignRow), '不能移到别的工作区')
 })
 
 test('a subagent conversation is refused', () => {
   const decision = decideDrop(seed(), { kind: 'session', sessionId: 'sub', workspaceId: 'w1' }, into(nodeRow('a1')))
   assert.equal(decision.issue.code, 'SUBAGENT')
   assert.equal(decision.action, null)
-  assert.equal(decision.label, '子智能体会话不能移动')
+  assert.equal(label(decision), '子智能体会话不能移动')
 })
 
 test('the ungrouped bucket takes part in no drag', () => {
   const state = seed()
   const loose = decideDrop(state, { kind: 'session', sessionId: 's3', workspaceId: null }, into(nodeRow('a1')))
   assert.equal(loose.issue.code, 'UNGROUPED')
-  assert.equal(loose.label, '未分组不参与拖动')
+  assert.equal(label(loose), '未分组不参与拖动')
 
   // The document outranks the payload: a row the Host has not accounted for yet
   // does not drag even when the caller claims a Workspace.
   const stale = decideDrop(state, { kind: 'session', sessionId: 's3', workspaceId: 'w1' }, into(nodeRow('a1')))
   assert.equal(stale.issue.code, 'UNGROUPED')
-  assert.equal(stale.label, '未分组不参与拖动')
+  assert.equal(label(stale), '未分组不参与拖动')
 
   const looseTarget = decideDrop(state, { kind: 'session', sessionId: 's1', workspaceId: 'w1' }, into(nodeRow('u1', null)))
   assert.equal(looseTarget.issue.code, 'UNGROUPED')
@@ -153,30 +166,30 @@ test('a conversation ignores an edge and says so', () => {
   const state = seed()
   const before = decideDrop(state, { kind: 'session', sessionId: 's1', workspaceId: 'w1' }, edgeOf(nodeRow('a1'), 'before'))
   assert.deepEqual(before.action, { kind: 'thread', sessionId: 's1', nodeId: 'a1' })
-  assert.equal(before.label, '移到「获客方式」下（对话不排序）')
+  assert.equal(label(before), '移到「获客方式」下（对话不排序）')
 
   const after = decideDrop(state, { kind: 'session', sessionId: 's1', workspaceId: 'w1' }, edgeOf(workspaceRow('w1'), 'after'))
   assert.deepEqual(after.action, { kind: 'thread', sessionId: 's1', nodeId: null })
-  assert.equal(after.label, '移到工作区下（对话不排序）')
+  assert.equal(label(after), '移到工作区下（对话不排序）')
 })
 
 test('a release over no row, a vanished row, or a vanished conversation is refused', () => {
   const state = seed()
   const nowhere = decideDrop(state, { kind: 'session', sessionId: 's1', workspaceId: 'w1' }, into(NO_ROW))
   assert.equal(nowhere.issue.code, 'NONE')
-  assert.equal(nowhere.label, '不能放在这里')
+  assert.equal(label(nowhere), '不能放在这里')
 
   const goneTarget = decideDrop(state, { kind: 'session', sessionId: 's1', workspaceId: 'w1' }, into(nodeRow('ghost')))
   assert.equal(goneTarget.issue.code, 'NOT_FOUND')
-  assert.equal(goneTarget.label, '目标节点已不存在')
+  assert.equal(label(goneTarget), '目标节点已不存在')
 
   const goneSession = decideDrop(state, { kind: 'session', sessionId: 'ghost', workspaceId: 'w1' }, into(nodeRow('a1')))
   assert.equal(goneSession.issue.code, 'NO_THREAD')
-  assert.equal(goneSession.label, '对话已不存在')
+  assert.equal(label(goneSession), '对话已不存在')
 
   const goneNode = decideDrop(state, { kind: 'node', nodeId: 'ghost', workspaceId: 'w1' }, into(nodeRow('a1')))
   assert.equal(goneNode.issue.code, 'NOT_FOUND')
-  assert.equal(goneNode.label, '目标节点已不存在')
+  assert.equal(label(goneNode), '目标节点已不存在')
 })
 
 test('a topic drops under another topic', () => {
@@ -184,30 +197,30 @@ test('a topic drops under another topic', () => {
   assert.deepEqual(decision.action, { kind: 'node', nodeId: 'a1', parentId: 'b', beforeNodeId: null })
   assert.equal(decision.issue, null)
   assert.equal(decision.noop, false)
-  assert.equal(decision.label, '移到「产品设计」下')
+  assert.equal(label(decision), '移到「产品设计」下')
 })
 
 test('a topic drops to the top of its own Workspace', () => {
   const decision = decideDrop(seed(), { kind: 'node', nodeId: 'a1', workspaceId: 'w1' }, into(workspaceRow('w1')))
   assert.deepEqual(decision.action, { kind: 'node', nodeId: 'a1', parentId: null, beforeNodeId: null })
-  assert.equal(decision.label, '移到工作区下')
+  assert.equal(label(decision), '移到工作区下')
 })
 
 test('a topic slots in before or after a sibling', () => {
   const state = seed()
   const before = decideDrop(state, { kind: 'node', nodeId: 'a3', workspaceId: 'w1' }, edgeOf(nodeRow('a1'), 'before'))
   assert.deepEqual(before.action, { kind: 'node', nodeId: 'a3', parentId: 'a', beforeNodeId: 'a1' })
-  assert.equal(before.label, '插到「获客方式」之前')
+  assert.equal(label(before), '插到「获客方式」之前')
 
   const after = decideDrop(state, { kind: 'node', nodeId: 'a1', workspaceId: 'w1' }, edgeOf(nodeRow('a2'), 'after'))
   assert.deepEqual(after.action, { kind: 'node', nodeId: 'a1', parentId: 'a', beforeNodeId: 'a3' })
-  assert.equal(after.label, '插到「转化路径」之后')
+  assert.equal(label(after), '插到「转化路径」之后')
 })
 
 test('after the last sibling appends', () => {
   const decision = decideDrop(seed(), { kind: 'node', nodeId: 'a1', workspaceId: 'w1' }, edgeOf(nodeRow('a3'), 'after'))
   assert.deepEqual(decision.action, { kind: 'node', nodeId: 'a1', parentId: 'a', beforeNodeId: null })
-  assert.equal(decision.label, '插到「渠道复盘」之后')
+  assert.equal(label(decision), '插到「渠道复盘」之后')
 })
 
 test('a topic dropped where it already is reports no change', () => {
@@ -216,7 +229,7 @@ test('a topic dropped where it already is reports no change', () => {
   assert.equal(alreadyFirst.noop, true)
   assert.equal(alreadyFirst.action, null)
   assert.equal(alreadyFirst.issue, null)
-  assert.equal(alreadyFirst.label, '位置不变')
+  assert.equal(label(alreadyFirst), '位置不变')
 
   const alreadyLast = decideDrop(state, { kind: 'node', nodeId: 'a3', workspaceId: 'w1' }, into(nodeRow('a')))
   assert.equal(alreadyLast.noop, true, 'the last child dropped into its own parent stays put')
@@ -242,7 +255,7 @@ test('a topic cannot land on itself or inside its own subtree', () => {
   const state = seed()
   const self = decideDrop(state, { kind: 'node', nodeId: 'a', workspaceId: 'w1' }, into(nodeRow('a')))
   assert.equal(self.issue.code, 'CYCLE')
-  assert.equal(self.label, '不能移到自己的子节点下')
+  assert.equal(label(self), '不能移到自己的子节点下')
   assert.equal(self.action, null)
 
   const descendant = decideDrop(state, { kind: 'node', nodeId: 'a', workspaceId: 'w1' }, into(nodeRow('a1x')))
@@ -257,7 +270,7 @@ test('a topic that would break the depth ceiling is refused', () => {
   const tooDeep = decideDrop(state, { kind: 'node', nodeId: 'leaf', workspaceId: 'w1' }, into(nodeRow('d12')))
   assert.equal(tooDeep.issue.code, 'DEPTH')
   assert.equal(tooDeep.action, null)
-  assert.equal(tooDeep.label, '超过 12 层')
+  assert.equal(label(tooDeep), '超过 12 层')
 
   const fits = decideDrop(state, { kind: 'node', nodeId: 'leaf', workspaceId: 'w1' }, into(nodeRow('d11')))
   assert.equal(fits.issue, null)
@@ -268,23 +281,23 @@ test('a topic never crosses Workspaces, not even onto an L1 row', () => {
   const state = seed()
   const foreignNode = decideDrop(state, { kind: 'node', nodeId: 'a', workspaceId: 'w1' }, into(nodeRow('c', 'w2')))
   assert.equal(foreignNode.issue.code, 'WORKSPACE')
-  assert.equal(foreignNode.label, '不能移到别的工作区')
+  assert.equal(label(foreignNode), '不能移到别的工作区')
   assert.equal(foreignNode.action, null)
 
   const foreignRow = decideDrop(state, { kind: 'node', nodeId: 'a', workspaceId: 'w1' }, into(workspaceRow('w2')))
   assert.equal(foreignRow.issue.code, 'WORKSPACE')
-  assert.equal(foreignRow.label, '不能移到别的工作区')
+  assert.equal(label(foreignRow), '不能移到别的工作区')
 })
 
 test('an ungrouped topic neither drags nor takes a drop', () => {
   const state = seed()
   const loose = decideDrop(state, { kind: 'node', nodeId: 'u1', workspaceId: null }, into(nodeRow('a')))
   assert.equal(loose.issue.code, 'UNGROUPED')
-  assert.equal(loose.label, '未分组不参与拖动')
+  assert.equal(label(loose), '未分组不参与拖动')
 
   const ontoLoose = decideDrop(state, { kind: 'node', nodeId: 'a', workspaceId: 'w1' }, into(nodeRow('u1', null)))
   assert.equal(ontoLoose.issue.code, 'UNGROUPED')
-  assert.equal(ontoLoose.label, '未分组不参与拖动')
+  assert.equal(label(ontoLoose), '未分组不参与拖动')
 })
 
 test('the plan commits cleanly through the model', () => {

@@ -39,6 +39,7 @@ function view(state, query, contentHits) {
     candidateThreads: state.threads,
     workspaceTitles: TITLES,
     contentHits,
+    labels: { ungrouped: '未分组', untitled: '未命名对话', workspaceFallback: '工作区' },
   })
 }
 

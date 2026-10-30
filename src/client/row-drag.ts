@@ -17,12 +17,17 @@
  * move would change anything is computed exactly the way `insertNodeBefore`
  * computes it (drop the moved node from its siblings, insert it at the anchor,
  * compare the sequence), so "no-op" here means "the model would write nothing".
+ *
+ * The pointer label is structured ({@link DragLabel}) and formatted by the render
+ * site through its own dictionary: the model's issue code is the identity, and
+ * the wording for "moved under …" / "not ordered" lives in the plugin's locale
+ * namespace, never in this module.
  */
-
 import {
   MAX_DEPTH, assignThreadIssue, moveNodeIssue, threadOfSession, workspaceOfNode,
   type MapNode, type MapState, type MoveIssue,
 } from '../shared/model.js'
+import type { Translate } from '../shared/copy.js'
 
 /**
  * What the pointer is carrying.
@@ -58,13 +63,25 @@ export interface DropCandidate {
   edge: DropKind
 }
 
+/** The destination sentence a valid drop would produce, before localization. */
+export type DragLabel =
+  | { kind: 'issue'; code: string }
+  | { kind: 'unchanged' }
+  | { kind: 'workspace' }
+  | { kind: 'under'; title: string }
+  | { kind: 'before'; title: string }
+  | { kind: 'after'; title: string }
+  | { kind: 'sessionWorkspace'; unordered: boolean }
+  | { kind: 'sessionUnder'; title: string; unordered: boolean }
+
 /**
  * What releasing here would do.
  *
- * `issue` non-null means the target is refused (show `label`, commit nothing);
- * `noop` means the target is fine but the move would change nothing (`action` is
- * then `null` as well, so a caller that only looks at `action` cannot commit
- * one by accident). Otherwise `action` is the plan to hand to the store.
+ * `issue` non-null means the target is refused (show the label for its code,
+ * commit nothing); `noop` means the target is fine but the move would change
+ * nothing (`action` is then `null` as well, so a caller that only looks at
+ * `action` cannot commit one by accident). Otherwise `action` is the plan to
+ * hand to the store.
  */
 export interface DropDecision {
   action:
@@ -75,8 +92,8 @@ export interface DropDecision {
   issue: MoveIssue | null
   /** The drop is valid but would change nothing — do not commit. */
   noop: boolean
-  /** Follow-the-pointer label, already user-facing Chinese. */
-  label: string
+  /** Follow-the-pointer label, localized by {@link formatDragLabel}. */
+  label: DragLabel
 }
 
 /** Travel, in CSS pixels, before a press becomes a drag. */
@@ -95,28 +112,60 @@ export function exceedsDragThreshold(from: { x: number; y: number }, to: { x: nu
   return Math.hypot(to.x - from.x, to.y - from.y) >= DRAG_THRESHOLD_PX
 }
 
-/** Refusals the model states in its own words but the pointer label says shorter. */
-const ISSUE_LABELS: Readonly<Record<string, string>> = {
-  NOT_FOUND: '目标节点已不存在',
-  WORKSPACE: '不能移到别的工作区',
-  CYCLE: '不能移到自己的子节点下',
-  DEPTH: `超过 ${String(MAX_DEPTH)} 层`,
-  SPACE: '只能移到默认空间的节点下',
-  SUBAGENT: '子智能体会话不能移动',
-  ANCHOR: '锚点不在目标位置下',
-  NO_THREAD: '对话已不存在',
-  NONE: '不能放在这里',
-  UNGROUPED: '未分组不参与拖动',
+/** One refused drop: the model's issue plus the structured label the pointer shows. */
+function refused(issue: MoveIssue): DropDecision {
+  return { action: null, issue, noop: false, label: { kind: 'issue', code: issue.code } }
 }
 
-/** One refused drop: the model's issue plus the short label the pointer shows. */
-function refused(issue: MoveIssue): DropDecision {
-  return { action: null, issue, noop: false, label: ISSUE_LABELS[issue.code] ?? issue.message }
+/** One refused drop stated directly with the model's issue vocabulary. */
+function refusedCode(code: string): DropDecision {
+  return { action: null, issue: { code, message: code }, noop: false, label: { kind: 'issue', code } }
 }
 
 /** One valid drop that would change nothing. */
 function unchanged(): DropDecision {
-  return { action: null, issue: null, noop: true, label: '位置不变' }
+  return { action: null, issue: null, noop: true, label: { kind: 'unchanged' } }
+}
+
+/**
+ * Format a structured pointer label through the caller's dictionary.
+ * @param t - the active translator (namespace `conversation-map`).
+ * @param label - the structured label.
+ * @returns the user-facing sentence.
+ */
+export function formatDragLabel(t: Translate, label: DragLabel): string {
+  switch (label.kind) {
+    case 'issue':
+      return label.code === 'DEPTH'
+        ? t('drag.issue.DEPTH', { max: MAX_DEPTH })
+        : t(`drag.issue.${label.code}`)
+    case 'unchanged':
+      return t('drag.unchanged')
+    case 'workspace':
+      return t('drag.workspace')
+    case 'under':
+      return t('drag.under', { title: label.title })
+    case 'before':
+      return t('drag.before', { title: label.title })
+    case 'after':
+      return t('drag.after', { title: label.title })
+    case 'sessionWorkspace':
+      return withUnorderedNote(t, t('drag.workspace'), label.unordered)
+    case 'sessionUnder':
+      return withUnorderedNote(t, t('drag.under', { title: label.title }), label.unordered)
+  }
+}
+
+/**
+ * A conversation is ordered by activity, never by hand, so a sibling edge means
+ * nothing to it: the label says so instead of promising a slot.
+ * @param t - the active translator.
+ * @param base - the destination sentence.
+ * @param unordered - true when the pointer named a sibling edge.
+ * @returns the sentence with the no-ordering note appended when needed.
+ */
+function withUnorderedNote(t: Translate, base: string, unordered: boolean): string {
+  return unordered ? base + t('drag.unorderedSuffix') : base
 }
 
 /** Siblings of one parent inside one Workspace, in the model's display order. */
@@ -178,43 +227,43 @@ function slotChanges(
  * @param state - the map, as the panel currently has it.
  * @param payload - the row the drag started from.
  * @param candidate - the row and edge under the pointer.
- * @returns the plan, the refusal, or the no-op, with a label to show.
+ * @returns the plan, the refusal, or the no-op, with a structured label to show.
  */
 export function decideDrop(state: MapState, payload: DragPayload, candidate: DropCandidate): DropDecision {
   const row = candidate.row
   if (row.kind === 'none') {
-    return refused({ code: 'NONE', message: '这里没有可以放置的目标。' })
+    return refusedCode('NONE')
   }
   // The ungrouped bucket is a conversation list, not a Workspace: it has no
   // Workspace for a target to agree with, so nothing in it drags and nothing
   // drops into it.
   if (payload.workspaceId === null || (row.kind === 'node' && row.workspaceId === null)) {
-    return refused({ code: 'UNGROUPED', message: '未分组的内容不参与拖动。' })
+    return refusedCode('UNGROUPED')
   }
 
   if (payload.kind === 'session') return decideSession(state, payload, candidate)
 
   const source = state.nodes.find(node => node.id === payload.nodeId)
   if (source === undefined) {
-    return refused({ code: 'NOT_FOUND', message: '节点已不存在，请刷新。' })
+    return refusedCode('NOT_FOUND')
   }
   const workspaceId = workspaceOfNode(source)
   if (row.workspaceId !== workspaceId) {
-    return refused({ code: 'WORKSPACE', message: '不能把节点移动到其他工作区的节点下。' })
+    return refusedCode('WORKSPACE')
   }
 
   if (row.kind === 'workspace') {
-    return planNode(state, source, null, null, '移到工作区下')
+    return planNode(state, source, null, null, { kind: 'workspace' })
   }
   const target = state.nodes.find(node => node.id === row.nodeId)
   if (target === undefined) {
-    return refused({ code: 'NOT_FOUND', message: '节点已不存在，请刷新。' })
+    return refusedCode('NOT_FOUND')
   }
   if (candidate.edge === 'into') {
-    return planNode(state, source, target.id, null, `移到「${target.title}」下`)
+    return planNode(state, source, target.id, null, { kind: 'under', title: target.title })
   }
   if (candidate.edge === 'before') {
-    return planNode(state, source, target.parentId, target.id, `插到「${target.title}」之前`)
+    return planNode(state, source, target.parentId, target.id, { kind: 'before', title: target.title })
   }
   const siblings = siblingsOf(state, target.parentId, workspaceId)
   return planNode(
@@ -222,7 +271,7 @@ export function decideDrop(state: MapState, payload: DragPayload, candidate: Dro
     source,
     target.parentId,
     nextSiblingId(siblings, target.id),
-    `插到「${target.title}」之后`,
+    { kind: 'after', title: target.title },
   )
 }
 
@@ -234,7 +283,7 @@ function decideSession(
 ): DropDecision {
   const row = candidate.row
   if (row.kind === 'none') {
-    return refused({ code: 'NONE', message: '这里没有可以放置的目标。' })
+    return refusedCode('NONE')
   }
   const thread = threadOfSession(state, payload.sessionId)
   // The document is the authority on which Workspace accounts for the
@@ -243,10 +292,10 @@ function decideSession(
   // undraggable; this is the backstop).
   const owner = thread === undefined ? payload.workspaceId : thread.workspaceId ?? null
   if (owner === null) {
-    return refused({ code: 'UNGROUPED', message: '未分组的内容不参与拖动。' })
+    return refusedCode('UNGROUPED')
   }
   if (row.workspaceId !== owner) {
-    return refused({ code: 'WORKSPACE', message: '只能把对话关联到它所属工作区里的节点。' })
+    return refusedCode('WORKSPACE')
   }
 
   const nodeId = row.kind === 'workspace' ? null : row.nodeId
@@ -256,37 +305,30 @@ function decideSession(
     // `assignThreadIssue` stays permissive for a conversation the index has never
     // seen (the model tools need that), but a row on screen that is no longer in
     // the document cannot be dragged anywhere.
-    return refused({ code: 'NO_THREAD', message: '这条对话已不在对话树中。' })
+    return refusedCode('NO_THREAD')
   }
 
+  const unordered = candidate.edge !== 'into'
   if (row.kind === 'workspace') {
     if (thread.nodeId === null) return unchanged()
     return {
       action: { kind: 'thread', sessionId: payload.sessionId, nodeId: null },
       issue: null,
       noop: false,
-      label: edgeSuffix(candidate.edge, '移到工作区下'),
+      label: { kind: 'sessionWorkspace', unordered },
     }
   }
   const target = state.nodes.find(node => node.id === nodeId)
   if (target === undefined) {
-    return refused({ code: 'NOT_FOUND', message: '节点已不存在，请刷新。' })
+    return refusedCode('NOT_FOUND')
   }
   if (thread.nodeId === target.id) return unchanged()
   return {
     action: { kind: 'thread', sessionId: payload.sessionId, nodeId: target.id },
     issue: null,
     noop: false,
-    label: edgeSuffix(candidate.edge, `移到「${target.title}」下`),
+    label: { kind: 'sessionUnder', title: target.title, unordered },
   }
-}
-
-/**
- * A conversation is ordered by activity, never by hand, so an edge means nothing
- * to it: the drop is `into`, and the label says so instead of promising a slot.
- */
-function edgeSuffix(edge: DropKind, label: string): string {
-  return edge === 'into' ? label : `${label}（对话不排序）`
 }
 
 /** A topic drop: re-parent to `parentId`, slotting it before `beforeNodeId`. */
@@ -295,7 +337,7 @@ function planNode(
   source: MapNode,
   parentId: string | null,
   beforeNodeId: string | null,
-  label: string,
+  label: DragLabel,
 ): DropDecision {
   const issue = moveNodeIssue(state, source.id, parentId)
   if (issue !== null) return refused(issue)

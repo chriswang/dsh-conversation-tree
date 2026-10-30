@@ -117,7 +117,7 @@ test('the clearance fold is scoped to map mode', () => {
 /**
  * The space switcher leads the band's second row, on the node list's own rail.
  *
- * Pinned here because the earlier layout hid it across the whole 200–480px band
+ * Pinned here because the earlier layout hid it across the whole narrow band
  * (`@container (max-width:480px)`), and because what keeps it from reading as a
  * tab glued to the column head below is arithmetic between rules that live far
  * apart in the sheet: the row's inset, the pill's inset and the first column's
@@ -128,7 +128,7 @@ test('the space switcher leads the band second row, on the node list rail', () =
   assert.equal(
     /\.cm-band-space\{display:none\}/.test(bundle),
     false,
-    'nothing may hide the space switcher: the band is visible down to 200px, so no width is safe to take from it',
+    'nothing may hide the space switcher: the band stays visible down to MIN_MAP_WIDTH (320px), so no width is safe to take from it',
   )
   assert.equal(
     /max-width:\s*480px/.test(bundle),
@@ -150,7 +150,7 @@ test('the space switcher leads the band second row, on the node list rail', () =
   const pill = declarations('.cm-band-row2 .cm-space-btn')
   assert.notEqual(pill, null, 'the pill takes the second row rhythm')
   assert.match(pill, /height:24px/)
-  assert.match(pill, /min-width:58px/, `a floor keeps both glyphs once the label is squeezed away: ${pill}`)
+  assert.match(pill, /min-width:58px/, `the row-2 pill rule keeps its historical floor; the breadcrumb bar overrides it with min-width:0 and is pinned by its own test: ${pill}`)
   assert.match(pill, /padding:0 calc\(var\(--cm-band-rail,14px\) - 7px\)/)
   assert.match(pill, /background:transparent/, `the pill rests as a ghost, not as a solid block on the head: ${pill}`)
   assert.match(
@@ -219,8 +219,11 @@ test('the band hides exactly the shell second seat button, only in map mode', ()
  * fully hidden. `visibility` (not `display`) keeps the geometry the shell
  * measures; the descendant `*` is required because sibling plugins re-state
  * `visibility:visible` on their own rows. Every selector must stay behind the
- * darwin + map-mode + collapsed gates: Web/Windows keep a 56px interactive rail,
- * and outside map mode a manual collapse is the shell's own behaviour.
+ * darwin + map-mode + collapsed gates: Windows desktop also collapses to zero
+ * width, but keeps its reopen controls visible as fixed caption-row buttons
+ * inside the same sidebar slot (hiding them would remove the only visible way
+ * back), Web keeps a 56px interactive rail, and outside map mode a manual
+ * collapse is the shell's own behaviour.
  */
 test('the collapsed shell sidebar is silenced in map mode only', () => {
   const silence = 'html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapsed] [data-slot="sidebar"] *'
@@ -657,9 +660,45 @@ test('the space entry gives its cluster up in the compact and search states', ()
   assert.notEqual(compact, null, 'the compact header hides the counts instead of squeezing the controls')
   assert.match(compact, /display:none/, `the compact rule removes the cluster: ${compact}`)
 
-  const searching = declarations('.cm-band-row2:has(.cm-search) .cm-space-btn .cm-rollup')
+  const searching = declarations('.cm-band-row2:has(.cm-search) .cm-crumb .cm-rollup')
   assert.notEqual(searching, null, 'opening the search field on row two hides the counts too')
   assert.match(searching, /display:none/, `the search rule removes the cluster: ${searching}`)
+})
+
+/**
+ * The space entry is one breadcrumb control: the whole bar is a single button, so
+ * every segment (including the whole-map count) opens the space menu. Only the
+ * current space's name shrinks; the root label, the separator and both clusters
+ * stay whole. The row-2 pill box supplies height/padding, and the direct-child
+ * rule lifts the pill's 180px ceiling off the bar.
+ */
+test('the space breadcrumb is one control with a static root and a shrinkable current name', () => {
+  const crumbRules = allDeclarations('.cm-crumb')
+  const crumb = crumbRules.find(rule => /display:flex/.test(rule)) ?? null
+  assert.notEqual(crumb, null, 'the breadcrumb has its own container rule')
+  assert.match(crumb, /min-width:0/, `the row may shrink the breadcrumb: ${crumb}`)
+
+  const rowRule = declarations('.cm-band-row2>.cm-crumb')
+  assert.notEqual(rowRule, null, 'the breadcrumb is the row-2 pill seat')
+  assert.match(rowRule, /max-width:100%/, `the bar may use the row's width: ${rowRule}`)
+
+  const root = declarations('.cm-crumb-root')
+  assert.notEqual(root, null, 'the root segment has its own box')
+  assert.match(root, /flex:none/, `the root never participates in shrinking: ${root}`)
+
+  const separator = declarations('.cm-crumb-sep')
+  assert.notEqual(separator, null, 'the separator is its own element')
+  assert.match(separator, /flex:none/, `the separator never shrinks: ${separator}`)
+
+  const current = declarations('.cm-crumb-current')
+  assert.notEqual(current, null, 'the current segment has its own box')
+  assert.match(current, /flex:0 1 auto/, `only the current segment may shrink: ${current}`)
+  assert.match(current, /min-width:0/, `the current name may ellipsize: ${current}`)
+  assert.match(current, /font-weight:600/, `the current space reads as the active level: ${current}`)
+
+  const currentName = declarations('.cm-crumb-current .cm-space-name')
+  assert.notEqual(currentName, null, 'the current name owns the ellipsis')
+  assert.match(currentName, /text-overflow:ellipsis/, `a long space name truncates: ${currentName}`)
 })
 
 /**
